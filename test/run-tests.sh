@@ -47,10 +47,47 @@ make_sdist() {  # <unterordner> <name> <version> -> Archivpfad auf stdout
   printf '%s\n' "${d}/archive.tar.gz"
 }
 
+# Wie make_sdist, aber die PKG-INFO wird per Schleife (ohne Python) auf
+# deutlich > 64 KB aufgepolstert - so gross, wie eine reale sdist mit langer
+# 'long_description' werden kann. Deckt I-1 ab: 'tar tzf'/'tar xzOf' schrieben
+# bei einer derart grossen PKG-INFO frueher in eine bereits geschlossene Pipe
+# ("Write error: Broken pipe", rc 1), sobald der Leser dahinter (grep -q/-m1,
+# frueher 'head -40'/'head -1') vor dem Ende der Tar-Ausgabe aussteigt.
+# mit_changelog=1 haengt zusaetzlich viele weitere Zeilen an, die selbst wie
+# "Version: "-Treffer aussehen (simuliert ein Changelog in der Description) -
+# das deckt zusaetzlich den Fall ab, in dem nicht die Datei, sondern das
+# sed-Ergebnis selbst > 64 KB wird (ein 'sed | head -1' danach waere genauso
+# betroffen wie 'tar | grep/head' davor - deshalb beendet sich sed in
+# build-sdist.sh/sdist-meta.sh nach dem ersten Treffer per 'q' selbst).
+make_big_sdist() {  # <unterordner> <name> <version> [mit_changelog] -> Archivpfad auf stdout
+  local d="${TMP}/$1" name="$2" ver="$3" with_changelog="${4:-0}" i
+  mkdir -p "${d}/dist-${ver}"
+  {
+    printf 'Metadata-Version: 2.1\nName: %s\nVersion: %s\n' "$name" "$ver"
+    i=0
+    while [[ $i -lt 1200 ]]; do
+      printf 'Description: filler filler filler filler filler filler filler filler line %d\n' "$i"
+      i=$((i+1))
+    done
+    if [[ "$with_changelog" == 1 ]]; then
+      i=0
+      while [[ $i -lt 3000 ]]; do
+        printf 'Version: %s.dev%d - Changelog-Eintrag\n' "$ver" "$i"
+        i=$((i+1))
+      done
+    fi
+  } > "${d}/dist-${ver}/PKG-INFO"
+  ( cd "$d" && tar czf archive.tar.gz "dist-${ver}" )
+  printf '%s\n' "${d}/archive.tar.gz"
+}
+
 # Stub fuer python3: bedient genau die zwei Aufrufe, die build-sdist.sh
 # absetzt ('-c import build' und '-m build --sdist --outdir <dir>'), und legt
 # im outdir ein Archiv wie make_sdist ab. Name/Version kommen aus STUB_NAME/
 # STUB_VERSION, damit der Test den Fall "Ordner != Paketname" abdeckt.
+# STUB_BIG_PKGINFO=1 polstert die erzeugte PKG-INFO wie make_big_sdist auf
+# > 64 KB auf - fuer den I-1-Test, der den kompletten build-sdist.sh-Pfad
+# (nicht nur sdist-meta.sh direkt) mit einer grossen sdist durchlaufen laesst.
 #
 # Grund: der Happy Path lief bisher nur, wenn python-build oder setuptools
 # installiert waren, und wurde sonst als SKIP gemeldet. So blieb der komplette
@@ -78,7 +115,16 @@ name="${STUB_NAME:?}"; ver="${STUB_VERSION:?}"
 base="$(printf '%s' "$name" | tr 'A-Z' 'a-z' | tr '.-' '__')-${ver}"
 work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
 mkdir "${work}/${base}"
-printf 'Metadata-Version: 2.1\nName: %s\nVersion: %s\n' "$name" "$ver" > "${work}/${base}/PKG-INFO"
+{
+  printf 'Metadata-Version: 2.1\nName: %s\nVersion: %s\n' "$name" "$ver"
+  if [[ "${STUB_BIG_PKGINFO:-0}" == 1 ]]; then
+    i=0
+    while [[ $i -lt 1200 ]]; do
+      printf 'Description: filler filler filler filler filler filler filler filler line %d\n' "$i"
+      i=$((i+1))
+    done
+  fi
+} > "${work}/${base}/PKG-INFO"
 tar czf "${out}/${base}.tar.gz" -C "$work" "$base"
 echo "Successfully built ${base}.tar.gz"
 STUB
@@ -126,6 +172,24 @@ OUT="$(bash "$SCRIPTS/sdist-meta.sh" "${TMP}/gibtsnicht.tar.gz" 2>&1)"; RC=$?
 assert_rc "fehlendes Archiv -> rc 1" 1 "$RC"
 assert_contains "fehlendes Archiv -> Meldung" "$OUT" "nicht gefunden"
 
+# I-1: PKG-INFO > 64 KB darf den Broken-Pipe-Abbruch nicht mehr ausloesen
+# (frueher: 'tar xzOf ... | sed -n ... | head -1' unter 'set -o pipefail').
+BIG_ARCHIVE="$(make_big_sdist gross 'Grosses.Paket' '3.4.5')"
+OUT="$(bash "$SCRIPTS/sdist-meta.sh" "$BIG_ARCHIVE" name 2>&1)"; RC=$?
+assert_rc "grosse PKG-INFO (>64 KB) -> rc 0" 0 "$RC"
+assert_eq "grosse PKG-INFO -> Name" "Grosses.Paket" "$OUT"
+assert_eq "grosse PKG-INFO -> Version" "3.4.5" \
+  "$(bash "$SCRIPTS/sdist-meta.sh" "$BIG_ARCHIVE" version 2>/dev/null)"
+
+# Zusatzfall: eine zweite, spaeter im Text beginnende "Version: "-Zeile (z. B.
+# ein Changelog in der Description) darf den ersten (richtigen) Treffer nicht
+# verdecken UND darf nicht selbst zum Broken-Pipe-Abbruch fuehren, wenn das
+# sed-Ergebnis (alle Treffer) fuer sich genommen schon > 64 KB waere.
+BIG_ARCHIVE_CL="$(make_big_sdist gross-changelog 'Anderes.Paket' '7.0' 1)"
+OUT="$(bash "$SCRIPTS/sdist-meta.sh" "$BIG_ARCHIVE_CL" version 2>&1)"; RC=$?
+assert_rc "grosse PKG-INFO mit Changelog-Zeilen -> rc 0" 0 "$RC"
+assert_eq "grosse PKG-INFO mit Changelog-Zeilen -> erster Treffer gewinnt" "7.0" "$OUT"
+
 echo
 echo "=== build-sdist.sh ==="
 mkdir -p "${TMP}/leer"
@@ -154,6 +218,22 @@ assert_contains "Stub-Backend: Log meldet Ordner -> Paketname" \
   "$(cat "${TMP}/stub-build.err")" "Ordner 'alpha' -> Mein.Tolles_Paket 2.1.post1"
 assert_eq "Stub-Backend: Staging-Verzeichnis aufgeraeumt" "" \
   "$(ls -A "${REPO}/dist" | grep '^\.build-' || true)"
+
+# I-1 durch den kompletten build-sdist.sh-Pfad: der Stub legt hier eine
+# PKG-INFO > 64 KB ins gebaute Archiv (STUB_BIG_PKGINFO=1), und build-sdist.sh
+# muss trotzdem durchlaufen - frueher brach 'tar xzOf ... | head -40' (Z. 63
+# vor dem Fix) mit "Write error: Broken pipe" ab.
+REPO="$(fixture_repo)"
+OUT="$(cd "$REPO" && PATH="${STUB_BIN}:${PATH}" STUB_NAME='Grosses.Paket' STUB_VERSION='9.9' \
+       STUB_BIG_PKGINFO=1 \
+       bash "$SCRIPTS/build-sdist.sh" alpha 2>"${TMP}/stub-big-build.err")"; RC=$?
+assert_rc "Stub-Backend, grosse PKG-INFO (>64 KB): rc 0" 0 "$RC"
+assert_eq "Stub-Backend, grosse PKG-INFO: Archivpfad auf stdout" \
+  "dist/grosses_paket-9.9.tar.gz" "$OUT"
+assert_eq "Stub-Backend, grosse PKG-INFO: Version aus gebauter sdist" "9.9" \
+  "$(bash "$SCRIPTS/sdist-meta.sh" "${REPO}/${OUT}" version 2>/dev/null)"
+assert_contains "Stub-Backend, grosse PKG-INFO: Log meldet Ordner -> Paketname" \
+  "$(cat "${TMP}/stub-big-build.err")" "Ordner 'alpha' -> Grosses.Paket 9.9"
 
 # Zusaetzlich mit echtem Backend, wenn eines da ist. Der Stub prueft nur den
 # Bash-Teil; erst hier zeigt sich, ob der Aufruf von python-build/setuptools

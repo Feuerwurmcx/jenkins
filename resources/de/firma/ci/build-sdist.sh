@@ -52,17 +52,40 @@ fi
 ARCHIVE="${BUILT[0]}"
 
 # Gegenprobe: gültige sdist?
-tar tzf "$ARCHIVE" | grep -q '/PKG-INFO$' || {
+# Kein 'tar tzf | grep' und kein 'tar xzOf | ...': unter 'set -o pipefail'
+# bricht tar mit "Write error: Broken pipe" (rc 1) ab, sobald der Leser
+# dahinter (grep -q/-m1, frueher auch 'head -40') vor dem Ende von tars
+# Ausgabe aussteigt und tar danach in die geschlossene Pipe weiterschreibt.
+# Mit bsdtar reproduzierbar bei einer PKG-INFO > 64 KB (siehe
+# test/run-tests.sh); auf Linux (GNU tar/GNU grep) faellt vermutlich schon
+# ein grosses Listing (viele Dateien in der sdist) genauso um. Deshalb
+# Listing und PKG-INFO je einmal vollstaendig in eine Variable lesen und
+# danach nur noch mit Herestrings (<<<) filtern - da liest niemand von einem
+# Prozess, der vorzeitig aussteigen und einen Schreibfehler ausloesen kann.
+LISTING="$(tar tzf "$ARCHIVE")"
+grep -q '/PKG-INFO$' <<<"$LISTING" || {
   echo "FEHLER: $(basename "$ARCHIVE") enthält kein PKG-INFO – keine gültige sdist" >&2
   exit 1
 }
 
 # Metadaten fürs Log – so sieht man sofort, wenn Ordner != Paketname
 # Siehe sdist-meta.sh: exakter Member statt Glob, wegen BSD tar.
-PKGINFO_MEMBER="$(tar tzf "$ARCHIVE" | grep -m1 '/PKG-INFO$')"
-META="$(tar xzOf "$ARCHIVE" "$PKGINFO_MEMBER" | head -40)"
-DIST_NAME="$(printf '%s\n' "$META" | sed -n 's/^Name: //p' | head -1)"
-DIST_VER="$(printf '%s\n' "$META" | sed -n 's/^Version: //p' | head -1)"
+PKGINFO_MEMBER="$(grep -m1 '/PKG-INFO$' <<<"$LISTING")"
+META="$(tar xzOf "$ARCHIVE" "$PKGINFO_MEMBER")"
+# sed beendet sich hier selbst per 'q' nach dem ersten Treffer, statt sich
+# auf ein nachgeschaltetes 'head -1' zu verlassen: kaeme aus der Description
+# eine zweite Zeile, die mit "Name: "/"Version: " beginnt (z. B. ein
+# eingebettetes Changelog), wuerde 'sed | head -1' aus demselben Grund wie
+# oben scheitern, sobald head schon zu ist und sed den zweiten Treffer noch
+# schreiben will.
+DIST_NAME="$(sed -n '/^Name: /{
+s/^Name: //p
+q
+}' <<<"$META")"
+DIST_VER="$(sed -n '/^Version: /{
+s/^Version: //p
+q
+}' <<<"$META")"
 echo "Ordner '${PKG}' -> ${DIST_NAME} ${DIST_VER}" >&2
 
 mv -f "$ARCHIVE" "${ABS_OUT}/"

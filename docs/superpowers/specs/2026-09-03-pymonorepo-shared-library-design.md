@@ -222,8 +222,9 @@ diesem Design (ganze Pipeline in der Library); die Namen kommen aus dem Entwurf:
 Das Zielverzeichnis wandert damit in den Checkout zurueck. Die urspruengliche
 Begruendung fuer WORKSPACE_TMP war, dass `changed-packages.sh` den Ordner sonst
 als Paket zaehlen wuerde. **Diese Begruendung war falsch** und ist beim Review
-von Task 4 widerlegt worden: `all_packages()` verlangt zusaetzlich eine
-`pyproject.toml`, `setup.py` oder `__init__.py` im Ordner. Ein Skriptordner mit
+von Task 4 widerlegt worden: `all_packages()` verlangte zusaetzlich eine
+`pyproject.toml`, `setup.py` oder `__init__.py` im Ordner (seit dem Nachtrag
+zum Paketkriterium unten: `pyproject.toml`, `setup.py` oder `setup.cfg`). Ein Skriptordner mit
 nur `.sh`-Dateien darin taucht nie in der Ausgabe auf, mit oder ohne Punkt.
 
 Was fuer den fuehrenden Punkt trotzdem spricht: der Ordner faellt im Checkout

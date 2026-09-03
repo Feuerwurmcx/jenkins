@@ -1130,3 +1130,44 @@ mehr nicht. Der erste echte Test ist ein Lauf auf einem Jenkins:
 3. Im Log pruefen: die Zeile "Skripte aus der Library nach ... geschrieben"
    erscheint, die Paketliste stimmt, pro Paket wird eine sdist gebaut.
 4. Danach ein Build ohne `SKIP_UPLOAD` gegen ein Test-Repo in Nexus.
+
+---
+
+## Nachtrag 2026-09-03: Ergebnis der Ausfuehrung
+
+Alle fuenf Tasks umgesetzt, je Task ein Review plus Fix-Runden; Abschluss-Review
+ueber den gesamten Bereich (0 Critical, 2 Important, 9 Minor, "With fixes"),
+Fix-Welle und scoped Re-Review sauber. Testtreiber am Ende: PASS 69 FAIL 0 SKIP 3.
+
+Ueber den Plan hinaus entschieden und umgesetzt: Shell-Werte per `withEnv`
+statt Interpolation (Injection), `mapfile` ersetzt (bash 3.2), tar-Aufrufe ohne
+`--wildcards` und ohne Pipes mit sterbendem Schreiber (bsdtar, `pipefail`),
+Paketkriterium ohne `__init__.py`, exakte rc-Assertions, python3-Stub im
+Testtreiber (aus paralleler Session).
+
+### Bewusst zurueckgestellt — nach dem Merge
+
+* `vars/pyMonorepo.groovy`: unbekannte Config-Schluessel werden still akzeptiert
+  (Tippfehler `hostedrepo` -> Default). Fix: nach `body()` unbekannte Keys per
+  `error` ablehnen.
+* `publish-pypi.sh:32`: `printf 'user = "%s:%s"'` ohne Escaping von `"`/`\` im
+  Passwort; curl scheitert dann und der Repo-Typ-Check degradiert zur Warnung.
+  Fix: `cfg_escape` aus dem geloeschten `upload-nexus.sh` uebernehmen.
+* `publish-pypi.sh:80`: `grep -qiE '400|...'` matcht "400" auch in Dateinamen
+  oder Byte-Zahlen -> jeder twine-Fehler wird als "Version liegt bereits" (rc 2)
+  gemeldet. Fix: `HTTPError: 400` matchen.
+* `test/run-tests.sh`: `git init -b main` braucht git >= 2.28.
+
+### Erster echter Jenkins-Lauf — Pruefreihenfolge
+
+1. Laedt die Library ueberhaupt (`@Library('ci-shared@...')`, Tag muss existieren)?
+2. Baut die Pipeline auf? Erster Kandidat fuer einen Fehler: `cfg.keepBuilds`
+   im `options`-Block (einziger `cfg`-Zugriff in einer Declarative-Direktive).
+   Fallback: fester Wert, `keepBuilds` aus API, Spec und README streichen.
+3. Log-Zeile "Skripte nach .ci-lib/ geschrieben"; `.ci-lib/*.sh` mit LF und
+   lesbaren Umlauten.
+4. `BUILD_ALL` + `SKIP_UPLOAD`: Paketliste gegen den alten Build vergleichen —
+   der Paketbegriff hat sich gegenueber `pack.sh` geaendert.
+5. Ein Paket mit vielen Dateien bauen (GNU-tar/GNU-grep-Seite der Pipe-Fixes).
+6. Erst dann ohne `SKIP_UPLOAD` gegen ein Test-Repo; vorher `twine` auf dem
+   Agenten pruefen.

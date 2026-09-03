@@ -207,6 +207,35 @@ assert_eq "PACKAGES-Schnittmenge mit echter Basis" "alpha" \
   "$(cd "$REPO" && PACKAGES='alpha beta gamma' $RUN HEAD~1 2>/dev/null)"
 
 echo
+echo "=== vars/pyMonorepo.groovy ==="
+GROOVY="${ROOT}/vars/pyMonorepo.groovy"
+if [[ -f "$GROOVY" ]]; then
+  ok "vars/pyMonorepo.groovy vorhanden"
+
+  # Jedes Skript, das die Groovy-Datei nennt, muss es auch geben - und umgekehrt.
+  NAMED="$(grep -oE '[a-z-]+\.sh' "$GROOVY" | sort -u)"
+  HAVE="$(cd "$SCRIPTS" && ls *.sh | sort -u)"
+  assert_eq "genannte Skripte == vorhandene Skripte" "$HAVE" "$NAMED"
+
+  # Klammerbilanz - faengt den haeufigsten Copy-Paste-Fehler ab.
+  OPEN="$(tr -cd '{' < "$GROOVY" | wc -c | tr -d ' ')"
+  CLOSE="$(tr -cd '}' < "$GROOVY" | wc -c | tr -d ' ')"
+  assert_eq "geschweifte Klammern ausgeglichen" "$OPEN" "$CLOSE"
+
+  if command -v groovyc >/dev/null 2>&1; then
+    if groovyc -d "$TMP/groovyc" "$GROOVY" 2>"$TMP/groovyc.err"; then
+      ok "groovyc kompiliert"
+    else
+      nok "groovyc kompiliert" "$(head -3 "$TMP/groovyc.err")"
+    fi
+  else
+    skip "groovyc Syntaxpruefung" "groovyc nicht installiert"
+  fi
+else
+  nok "vars/pyMonorepo.groovy vorhanden" "Datei fehlt"
+fi
+
+echo
 echo "=== Bilanz ==="
 printf 'PASS %d  FAIL %d  SKIP %d\n' "$PASS" "$FAIL" "$SKIP"
 [[ $FAIL -eq 0 ]]

@@ -217,11 +217,16 @@ diesem Design (ganze Pipeline in der Library); die Namen kommen aus dem Entwurf:
 | Library-Name | `py-monorepo` | `ci-shared`, mit Versions-Tag |
 | Zielverzeichnis | `WORKSPACE_TMP/pymonorepo-scripts` | `.ci-lib` im Workspace |
 
-Das Zielverzeichnis wandert damit in den Checkout zurueck. Die Begruendung aus
-dem Mechanik-Abschnitt bleibt trotzdem erfuellt, aber aus einem anderen Grund:
-`changed-packages.sh` iteriert ueber `*/`, und dieser Glob ueberspringt
-Verzeichnisse mit fuehrendem Punkt. `.ci-lib` wird also nicht als Paket
-gezaehlt, und ungetrackt taucht es im `git diff` ohnehin nicht auf. Ein
-Zielverzeichnis **ohne** fuehrenden Punkt waere an dieser Stelle ein Fehler.
+Das Zielverzeichnis wandert damit in den Checkout zurueck. Die urspruengliche
+Begruendung fuer WORKSPACE_TMP war, dass `changed-packages.sh` den Ordner sonst
+als Paket zaehlen wuerde. **Diese Begruendung war falsch** und ist beim Review
+von Task 4 widerlegt worden: `all_packages()` verlangt zusaetzlich eine
+`pyproject.toml`, `setup.py` oder `__init__.py` im Ordner. Ein Skriptordner mit
+nur `.sh`-Dateien darin taucht nie in der Ausgabe auf, mit oder ohne Punkt.
+
+Was fuer den fuehrenden Punkt trotzdem spricht: der Ordner faellt im Checkout
+nicht auf, der `*/`-Glob ueberspringt ihn ohnehin, und ungetrackt erscheint er
+auch im `git diff` nicht. `.ci-lib` bleibt also richtig — nur nicht aus dem
+Grund, der hier zuerst stand.
 
 Im Monorepo gehoert `.ci-lib/` in die `.gitignore`.

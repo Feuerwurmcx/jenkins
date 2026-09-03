@@ -102,8 +102,11 @@ fingerprint: true`); `allowEmptyArchive: true` sorgt dafuer, dass ein Build
 ohne Paketaenderungen (kein `dist/`) deswegen nicht als Fehler gilt. Die
 sdists liegen danach im Artefakt-Tab des Builds, nicht mehr im Workspace: der
 `cleanup`-Block loescht anschliessend `dist/` und das Verzeichnis, in das die
-Skripte zur Laufzeit geschrieben wurden (`.ci-lib/`, siehe `CI_LIB_DIR`). Ein
-leerer Workspace nach dem Build ist also normal, kein Fehlschlag.
+Skripte zur Laufzeit geschrieben wurden (`.ci-lib/`, siehe `CI_LIB_DIR`). Mehr
+raeumt der `cleanup`-Block nicht weg - es gibt weder `cleanWs()` noch
+`deleteDir()`. Der uebrige Workspace bleibt zwischen Builds liegen: der
+Checkout, die Paketordner und Build-Nebenprodukte wie `*.egg-info` sind auch
+nach dem Build noch da.
 
 ## Lokal testen
 

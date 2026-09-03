@@ -204,3 +204,24 @@ steckt, erst auf einem Jenkins.
   Versionen erkennt `publish-pypi.sh` am 400 des Repos (Exit-Code 2).
 * „Lokal testen" auf die vier verbleibenden Skripte umschreiben.
 * „Troubleshooting: Permission denied" entfaellt (siehe Mechanik-Abschnitt).
+
+## Nachtrag 2026-09-03: Namen aus dem vorhandenen Entwurf
+
+Nach dem Design tauchte ein bereits vorhandener, ungetrackter Entwurf
+`pyMonorepo.groovy` im Arbeitsverzeichnis auf. Beim API-Schnitt bleibt es bei
+diesem Design (ganze Pipeline in der Library); die Namen kommen aus dem Entwurf:
+
+| | vorher | jetzt |
+|---|---|---|
+| Resource-Pfad | `de/ba/pymonorepo` | `de/firma/ci` |
+| Library-Name | `py-monorepo` | `ci-shared`, mit Versions-Tag |
+| Zielverzeichnis | `WORKSPACE_TMP/pymonorepo-scripts` | `.ci-lib` im Workspace |
+
+Das Zielverzeichnis wandert damit in den Checkout zurueck. Die Begruendung aus
+dem Mechanik-Abschnitt bleibt trotzdem erfuellt, aber aus einem anderen Grund:
+`changed-packages.sh` iteriert ueber `*/`, und dieser Glob ueberspringt
+Verzeichnisse mit fuehrendem Punkt. `.ci-lib` wird also nicht als Paket
+gezaehlt, und ungetrackt taucht es im `git diff` ohnehin nicht auf. Ein
+Zielverzeichnis **ohne** fuehrenden Punkt waere an dieser Stelle ein Fehler.
+
+Im Monorepo gehoert `.ci-lib/` in die `.gitignore`.

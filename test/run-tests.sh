@@ -480,9 +480,19 @@ if [[ -f "$GROOVY" ]]; then
   assert_eq "materializeScripts()-Liste == vorhandene Skripte" "$HAVE" "$NAMED"
 
   # libraryResource() muss exakt auf den Ressourcen-Pfad zeigen, unter dem
-  # Task 1-3 die Skripte abgelegt haben.
-  assert_contains "libraryResource-Pfad ist de/firma/ci" "$(cat "$GROOVY")" \
-    'libraryResource("de/firma/ci/${n}")'
+  # Task 1-3 die Skripte abgelegt haben, UND mit encoding: 'UTF-8' lesen
+  # (M-2): ohne das dekodiert Jenkins mit dem Default-Charset des
+  # Controllers, und die Umlaute in den Skript-Kommentaren/-Meldungen kommen
+  # bei LANG=C/POSIX als Mojibake auf dem Agent an. Der Aufruf wird zuerst
+  # als Ganzes extrahiert (bis zur ersten schliessenden Klammer - kein
+  # verschachteltes '()' darin), Pfad und encoding dann getrennt geprueft,
+  # damit beide Mutationen (Pfad verbogen, encoding entfernt/geaendert)
+  # je fuer sich durchfallen.
+  LIBRARY_RESOURCE_CALL="$(grep -oE 'libraryResource\([^)]*\)' "$GROOVY")"
+  assert_contains "libraryResource-Pfad ist de/firma/ci" "$LIBRARY_RESOURCE_CALL" \
+    'resource: "de/firma/ci/${n}"'
+  assert_contains "libraryResource liest mit encoding UTF-8" "$LIBRARY_RESOURCE_CALL" \
+    "encoding: 'UTF-8'"
 
   # Das Zielverzeichnis kommt seit der CPS-Default-Param-Korrektur explizit
   # vom Aufrufer (materializeScripts('.ci-lib')). Der fuehrende Punkt ist

@@ -176,7 +176,7 @@ def call(Closure body) {
                 sh 'rm -rf dist'
                 script {
                     if (env.CI_LIB_DIR) {
-                        sh "rm -rf '${env.CI_LIB_DIR}'"
+                        sh 'rm -rf "$CI_LIB_DIR"'
                     }
                 }
             }
@@ -207,7 +207,7 @@ private String materializeScripts(String targetDir) {
     List names = ['changed-packages.sh', 'build-sdist.sh', 'sdist-meta.sh', 'publish-pypi.sh']
     names.each { n ->
         writeFile file: "${targetDir}/${n}",
-                  text: libraryResource("de/firma/ci/${n}"),
+                  text: libraryResource(resource: "de/firma/ci/${n}", encoding: 'UTF-8'),
                   encoding: 'UTF-8'
     }
     echo "Skripte nach ${targetDir}/ geschrieben: ${names.join(', ')}"

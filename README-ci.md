@@ -27,10 +27,18 @@ auf den Agent geschrieben - ein Monorepo braucht deshalb keinen `ci/`-Ordner.
    `nexus-pypi-deploy`.
 3. Jenkins: Manage Jenkins -> System -> Global Pipeline Libraries, dieses Repo
    unter dem Namen `ci-shared` eintragen.
-4. Im Monorepo `examples/Jenkinsfile` als `Jenkinsfile` in die Wurzel legen und
-   `nexusUrl` sowie `hostedRepo` anpassen.
+4. Im Monorepo `examples/Jenkinsfile` als `Jenkinsfile` in die Wurzel legen,
+   `nexusUrl` sowie `hostedRepo` anpassen und `.ci-lib/` in die `.gitignore`
+   aufnehmen - dorthin schreibt die Library die Skripte bei jedem Build,
+   auch beim allerersten.
 5. Job als *Multibranch Pipeline* oder *Pipeline from SCM* anlegen - wichtig,
    damit `GIT_PREVIOUS_SUCCESSFUL_COMMIT` gesetzt wird.
+
+`examples/Jenkinsfile` referenziert `@Library('ci-shared@v1.0.0')`. Dieses
+Repo hat vor dem ersten produktiven Einsatz noch keinen Tag `v1.0.0` - vor der
+ersten Nutzung entweder einen passenden Tag auf der Library setzen oder die
+Versionsangabe im Jenkinsfile an das anpassen, was tatsaechlich existiert
+(z. B. einen Branch-Namen statt eines Tags).
 
 ## Konfiguration
 
@@ -64,17 +72,18 @@ ab; `publish-pypi.sh` erkennt das und bricht mit Exit-Code 2 und klarer Meldung
 ab, statt einen Infrastrukturfehler zu melden.
 
 `publish-pypi.sh` prueft ausserdem vorab ueber die Nexus-REST-API, ob
-`NEXUS_PYPI_HOSTED` wirklich ein hosted-PyPI-Repo ist (Exit 3 bei group oder
-proxy). Ist die API nicht erreichbar oder fehlen die Rechte, wird nur gewarnt.
-Abschalten mit `SKIP_REPO_CHECK=1`.
+`NEXUS_PYPI_HOSTED` wirklich ein hosted-PyPI-Repo ist (Exit 3 bei group, bei
+proxy und bei einem hosted-Repo, das kein PyPI-Format hat). Ist die API nicht
+erreichbar oder fehlen die Rechte, wird nur gewarnt. Abschalten mit
+`SKIP_REPO_CHECK=1`.
 
 ## Welche Pakete werden gebaut
 
 `changed-packages.sh` erkennt Pakete als Top-Level-Ordner mit `pyproject.toml`,
 `setup.py` oder `__init__.py`. Feste Liste stattdessen:
 
-    packages = 'paket1 paket2'      // im Jenkinsfile
-    PACKAGES="paket1 paket2" changed-packages.sh <base>     // lokal
+    packages = 'paket1 paket2'                                        // im Jenkinsfile
+    PACKAGES="paket1 paket2" bash resources/de/firma/ci/changed-packages.sh <base>     // lokal
 
 Gebaut wird die Schnittmenge aus "ist ein Paket" und "liegt im `git diff` seit
 dem letzten erfolgreichen Build". Drei Sonderfaelle bauen absichtlich alles:
@@ -84,6 +93,17 @@ dem letzten erfolgreichen Build". Drei Sonderfaelle bauen absichtlich alles:
 * Build mit Parameter `BUILD_ALL`
 
 Nur bauen, nicht hochladen: Build-Parameter `SKIP_UPLOAD`.
+
+## Artefakte und Aufraeumen
+
+Nach jedem Build - egal ob erfolgreich oder nicht - archiviert `pyMonorepo` im
+`post`-Block `dist/*.tar.gz` mit Fingerprint (`archiveArtifacts ...
+fingerprint: true`); `allowEmptyArchive: true` sorgt dafuer, dass ein Build
+ohne Paketaenderungen (kein `dist/`) deswegen nicht als Fehler gilt. Die
+sdists liegen danach im Artefakt-Tab des Builds, nicht mehr im Workspace: der
+`cleanup`-Block loescht anschliessend `dist/` und das Verzeichnis, in das die
+Skripte zur Laufzeit geschrieben wurden (`.ci-lib/`, siehe `CI_LIB_DIR`). Ein
+leerer Workspace nach dem Build ist also normal, kein Fehlschlag.
 
 ## Lokal testen
 

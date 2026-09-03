@@ -130,6 +130,56 @@ assert_contains "ohne HOSTED-Repo -> Meldung" "$OUT" "NEXUS_PYPI_HOSTED fehlt"
 skip "publish-pypi.sh echter Upload" "braucht Netzwerk und ein Nexus - bewusst nicht getestet"
 
 echo
+echo "=== changed-packages.sh ==="
+REPO="$(fixture_repo)"
+RUN="bash $SCRIPTS/changed-packages.sh"
+
+# Nur alpha angefasst
+( cd "$REPO" && echo "x" >> alpha/neu.py && git add -A && git commit -q -m "alpha" )
+assert_eq "nur alpha geaendert" "alpha" \
+  "$(cd "$REPO" && $RUN HEAD~1)"
+
+# gamma ist kein Paket, docs auch nicht
+( cd "$REPO" && echo "x" >> gamma/README.md && echo "y" >> docs/index.md \
+  && git add -A && git commit -q -m "kein paket" )
+assert_eq "nur Nicht-Pakete geaendert" "" \
+  "$(cd "$REPO" && $RUN HEAD~1)"
+
+# beta und alpha zusammen, sortiert
+( cd "$REPO" && echo "x" >> beta/pyproject.toml && echo "x" >> alpha/neu.py \
+  && git add -A && git commit -q -m "beide" )
+assert_eq "alpha und beta, sortiert" "alpha
+beta" "$(cd "$REPO" && $RUN HEAD~1)"
+
+# Jenkinsfile geaendert -> alles bauen
+( cd "$REPO" && echo "// x" >> Jenkinsfile && git add -A && git commit -q -m "jenkinsfile" )
+assert_eq "Jenkinsfile geaendert -> alles" "alpha
+beta" "$(cd "$REPO" && $RUN HEAD~1 2>/dev/null)"
+
+# ci/ geaendert -> alles bauen
+( cd "$REPO" && mkdir -p ci && echo "x" > ci/alt.sh && git add -A && git commit -q -m "ci" )
+assert_eq "ci/ geaendert -> alles" "alpha
+beta" "$(cd "$REPO" && $RUN HEAD~1 2>/dev/null)"
+
+# Leere Basis -> alles bauen
+assert_eq "leere Basis -> alles" "alpha
+beta" "$(cd "$REPO" && $RUN '' 2>/dev/null)"
+
+# Unbrauchbare Basis -> alles bauen, nicht abbrechen
+OUT="$(cd "$REPO" && $RUN deadbeefdeadbeef 2>/dev/null)"; RC=$?
+assert_rc "unbrauchbare Basis -> rc 0" 0 "$RC"
+assert_eq "unbrauchbare Basis -> alles" "alpha
+beta" "$OUT"
+
+# PACKAGES ersetzt die Auto-Erkennung
+assert_eq "PACKAGES-Override" "gamma" \
+  "$(cd "$REPO" && PACKAGES='gamma' $RUN '' 2>/dev/null)"
+
+# Hinweise gehen nach stderr, nicht nach stdout
+assert_contains "Hinweis auf stderr" \
+  "$(cd "$REPO" && $RUN '' 2>&1 >/dev/null)" "baue alle Pakete"
+
+echo
 echo "=== Bilanz ==="
 printf 'PASS %d  FAIL %d  SKIP %d\n' "$PASS" "$FAIL" "$SKIP"
 [[ $FAIL -eq 0 ]]

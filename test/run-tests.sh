@@ -81,13 +81,16 @@ make_big_sdist() {  # <unterordner> <name> <version> [mit_changelog] -> Archivpf
   printf '%s\n' "${d}/archive.tar.gz"
 }
 
-# Stub fuer python3: bedient genau die zwei Aufrufe, die build-sdist.sh
-# absetzt ('-c import build' und '-m build --sdist --outdir <dir>'), und legt
-# im outdir ein Archiv wie make_sdist ab. Name/Version kommen aus STUB_NAME/
-# STUB_VERSION, damit der Test den Fall "Ordner != Paketname" abdeckt.
+# Stub fuer python3: bedient die drei Aufrufe, die build-sdist.sh absetzt
+# ('-c import build', '-m build --sdist --outdir <dir>' und den Fallback
+# 'setup.py --quiet sdist --dist-dir <dir>'), und legt im outdir ein Archiv
+# wie make_sdist ab. Name/Version kommen aus STUB_NAME/STUB_VERSION, damit der
+# Test den Fall "Ordner != Paketname" abdeckt.
 # STUB_BIG_PKGINFO=1 polstert die erzeugte PKG-INFO wie make_big_sdist auf
 # > 64 KB auf - fuer den I-1-Test, der den kompletten build-sdist.sh-Pfad
 # (nicht nur sdist-meta.sh direkt) mit einer grossen sdist durchlaufen laesst.
+# STUB_NO_BUILD=1 laesst 'import build' fehlschlagen (rc 1), damit
+# build-sdist.sh auf den setup.py-Fallback (M-6b) umschaltet.
 #
 # Grund: der Happy Path lief bisher nur, wenn python-build oder setuptools
 # installiert waren, und wurde sonst als SKIP gemeldet. So blieb der komplette
@@ -103,10 +106,31 @@ make_python_stub() {  # -> Verzeichnis fuer PATH auf stdout
 #!/usr/bin/env bash
 # python3-Stub aus test/run-tests.sh (make_python_stub) - kein echtes Python.
 set -euo pipefail
+
+# M-6c: der Stub prueft, dass er tatsaechlich IM Paketordner steht, statt das
+# einfach anzunehmen. Ohne diese Pruefung wuerde ein versehentlich entferntes
+# 'cd "$PKG"' in build-sdist.sh unbemerkt bleiben - der Stub haette trotzdem
+# "funktioniert", nur im falschen Verzeichnis. Gilt nur fuer die beiden
+# Aufrufe, die laut build-sdist.sh im Paketordner laufen sollen (-m build,
+# setup.py sdist) - nicht fuer 'python3 -c "import build"': das laeuft in
+# build-sdist.sh VOR dem 'cd "$PKG"', im Checkout-Wurzelverzeichnis.
+check_cwd() {
+  [[ -f setup.py || -f setup.cfg || -f pyproject.toml ]] || {
+    echo "python3-stub: kein setup.py/setup.cfg/pyproject.toml im aktuellen Verzeichnis ($(pwd)) - build-sdist.sh haette hierher 'cd' sollen" >&2
+    exit 2
+  }
+}
+
 case "${1:-}" in
-  -c) exit 0 ;;   # 'import build' -> tut so, als waere python-build installiert
-  -m) [[ "${2:-}" == build && "${3:-}" == --sdist && "${4:-}" == --outdir && -n "${5:-}" ]] \
+  -c) [[ "${STUB_NO_BUILD:-0}" != 1 ]] || exit 1   # 'import build' schlaegt fehl -> setup.py-Fallback
+      exit 0 ;;   # 'import build' -> tut so, als waere python-build installiert
+  -m) check_cwd
+      [[ "${2:-}" == build && "${3:-}" == --sdist && "${4:-}" == --outdir && -n "${5:-}" ]] \
         || { echo "python3-stub: unerwartete Argumente: $*" >&2; exit 2; }
+      out="$5" ;;
+  setup.py) check_cwd
+      [[ "${2:-}" == --quiet && "${3:-}" == sdist && "${4:-}" == --dist-dir && -n "${5:-}" ]] \
+        || { echo "python3-stub: unerwartete Argumente (setup.py-Fallback): $*" >&2; exit 2; }
       out="$5" ;;
   *)  echo "python3-stub: unerwarteter Aufruf: $*" >&2; exit 2 ;;
 esac
@@ -235,6 +259,43 @@ assert_eq "Stub-Backend, grosse PKG-INFO: Version aus gebauter sdist" "9.9" \
 assert_contains "Stub-Backend, grosse PKG-INFO: Log meldet Ordner -> Paketname" \
   "$(cat "${TMP}/stub-big-build.err")" "Ordner 'alpha' -> Grosses.Paket 9.9"
 
+# M-6b: der setup.py-Fallback (build-sdist.sh Z. 34-36, wenn 'python3 -c
+# "import build"' fehlschlaegt) war bisher von keinem Test beruehrt - der
+# Stub beantwortete '-c' immer mit 0. STUB_NO_BUILD=1 laesst den Stub '-c'
+# mit rc 1 beantworten, build-sdist.sh muss dann auf 'setup.py --quiet sdist
+# --dist-dir' umschalten (vom Stub separat bedient, siehe make_python_stub).
+REPO="$(fixture_repo)"
+OUT="$(cd "$REPO" && PATH="${STUB_BIN}:${PATH}" STUB_NAME='Fallback.Paket' STUB_VERSION='4.2' \
+       STUB_NO_BUILD=1 \
+       bash "$SCRIPTS/build-sdist.sh" alpha 2>"${TMP}/stub-fallback-build.err")"; RC=$?
+assert_rc "setup.py-Fallback: rc 0" 0 "$RC"
+assert_eq "setup.py-Fallback: Archivpfad auf stdout" \
+  "dist/fallback_paket-4.2.tar.gz" "$OUT"
+assert_contains "setup.py-Fallback: Hinweis auf stderr" \
+  "$(cat "${TMP}/stub-fallback-build.err")" "nutze 'setup.py sdist'"
+assert_eq "setup.py-Fallback: Version aus gebauter sdist" "4.2" \
+  "$(bash "$SCRIPTS/sdist-meta.sh" "${REPO}/${OUT}" version 2>/dev/null)"
+
+# M-6c: der Stub prueft jetzt das cwd (siehe make_python_stub/check_cwd) -
+# das faengt ein versehentlich entferntes 'cd "$PKG"' in build-sdist.sh.
+# Gegenprobe hier direkt gefuehrt: build-sdist.sh in eine Kopie ohne das
+# 'cd "$PKG"' im -m-Aufruf patchen, zeigen, dass der Stub das als Fehler
+# erkennt (statt still im falschen Verzeichnis "erfolgreich" zu sein), dann
+# nichts weiter - die Kopie ist nur fuer diesen einen Aufruf da.
+PATCHED="${TMP}/build-sdist-ohne-cd.sh"
+sed 's/( cd "\$PKG" && python3 -m build --sdist --outdir "\$STAGE" ) >&2/python3 -m build --sdist --outdir "$STAGE" >\&2/' \
+  "$SCRIPTS/build-sdist.sh" > "$PATCHED"
+if ! diff -q "$SCRIPTS/build-sdist.sh" "$PATCHED" >/dev/null; then
+  OUT="$(cd "$REPO" && PATH="${STUB_BIN}:${PATH}" STUB_NAME='Cwd.Paket' STUB_VERSION='1.1' \
+         bash "$PATCHED" alpha 2>&1)"; RC=$?
+  assert_rc "Gegenprobe: entferntes 'cd \$PKG' wird vom Stub erkannt -> rc 2" 2 "$RC"
+  assert_contains "Gegenprobe: Stub meldet falsches Verzeichnis" "$OUT" \
+    "build-sdist.sh haette hierher 'cd' sollen"
+else
+  nok "Gegenprobe: 'cd \$PKG' im sed-Patch gefunden und entfernt" \
+    "sed-Muster hat nicht gegriffen - Gegenprobe ungueltig, bitte Muster pruefen"
+fi
+
 # Zusaetzlich mit echtem Backend, wenn eines da ist. Der Stub prueft nur den
 # Bash-Teil; erst hier zeigt sich, ob der Aufruf von python-build/setuptools
 # selbst stimmt. Aktivieren mit: python3 -m pip install --user build
@@ -266,6 +327,9 @@ assert_contains "ohne NEXUS_URL -> Meldung" "$OUT" "NEXUS_URL fehlt"
 
 OUT="$(NEXUS_URL=https://nexus.invalid NEXUS_PYPI_HOSTED= NEXUS_USER=u NEXUS_PASS=p \
        bash "$SCRIPTS/publish-pypi.sh" "$ARCHIVE" 2>&1)"; RC=$?
+# M-6d: rc-Assertion nachgezogen, analog zu den zwei Nachbarn oben (ohne
+# Argument, ohne NEXUS_URL) - fehlte hier bisher grundlos.
+assert_rc "ohne HOSTED-Repo -> rc 1" 1 "$RC"
 assert_contains "ohne HOSTED-Repo -> Meldung" "$OUT" "NEXUS_PYPI_HOSTED fehlt"
 
 skip "publish-pypi.sh echter Upload" "braucht Netzwerk und ein Nexus - bewusst nicht getestet"
@@ -336,6 +400,28 @@ assert_contains "Hinweis auf stderr" \
 ( cd "$REPO" && echo "x" > "alpha/übersetzung.txt" && git add -A && git commit -q -m "umlaut" )
 assert_eq "Umlaut-Datei wird gemeldet" "alpha" \
   "$(cd "$REPO" && $RUN HEAD~1)"
+
+# M-6a: '--no-renames' war bisher unbelegt. Ohne das Flag erkennt git
+# "Datei woanders hin verschoben, Inhalt gleich" per Default als Rename und
+# zeigt bei 'diff --name-only' nur den NEUEN Pfad - alpha wuerde eine Datei
+# verlieren, ohne als geaendert zu gelten.
+( cd "$REPO" && git mv alpha/neu.py beta/neu.py && git commit -q -m "verschoben" )
+assert_eq "git mv meldet Quell- UND Zielpaket (--no-renames)" "alpha
+beta" "$(cd "$REPO" && $RUN HEAD~1)"
+
+# Gegenprobe direkt hier gefuehrt (nicht nur manuell, siehe Bericht): eine
+# Kopie ohne '--no-renames' darf 'alpha' fuer denselben Commit NICHT mehr
+# melden.
+PATCHED_NR="${TMP}/changed-packages-ohne-no-renames.sh"
+sed 's/git -c core.quotepath=false diff --no-renames --name-only/git -c core.quotepath=false diff --name-only/' \
+  "$SCRIPTS/changed-packages.sh" > "$PATCHED_NR"
+if ! diff -q "$SCRIPTS/changed-packages.sh" "$PATCHED_NR" >/dev/null; then
+  assert_eq "Gegenprobe: ohne --no-renames faellt 'alpha' lautlos weg" "beta" \
+    "$(cd "$REPO" && bash "$PATCHED_NR" HEAD~1)"
+else
+  nok "Gegenprobe: '--no-renames' im sed-Patch gefunden und entfernt" \
+    "sed-Muster hat nicht gegriffen - Gegenprobe ungueltig, bitte Muster pruefen"
+fi
 
 # PACKAGES mit Sonderzeichen darf nicht durch das globale 'shopt -s nullglob'
 # des Skripts verschwinden. Leere Basis, damit direkt all_packages() greift

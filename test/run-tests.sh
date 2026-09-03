@@ -286,6 +286,15 @@ assert_eq "nur alpha geaendert" "alpha" \
 assert_eq "nur Nicht-Pakete geaendert" "" \
   "$(cd "$REPO" && $RUN HEAD~1)"
 
+# I-2: ein Top-Level-Ordner mit nur __init__.py (+ einer weiteren .py-Datei)
+# ist seit der Angleichung an build-sdist.sh KEIN Paket mehr - build-sdist.sh
+# kann daraus ohnehin keine sdist bauen (weder setup.py, setup.cfg noch
+# pyproject.toml). Aenderung darin darf deshalb nicht gemeldet werden.
+( cd "$REPO" && echo "def noop2(): pass" >> common/util.py \
+  && git add -A && git commit -q -m "common" )
+assert_eq "reiner __init__.py-Ordner ist kein Paket (I-2)" "" \
+  "$(cd "$REPO" && $RUN HEAD~1)"
+
 # beta und alpha zusammen, sortiert
 ( cd "$REPO" && echo "x" >> beta/pyproject.toml && echo "x" >> alpha/neu.py \
   && git add -A && git commit -q -m "beide" )
@@ -346,6 +355,27 @@ assert_eq "PACKAGES mit Glob-Zeichen bleibt literal" "al*" \
 ( cd "$REPO" && echo "x" >> alpha/neu.py && git add -A && git commit -q -m "alpha fuer packages" )
 assert_eq "PACKAGES-Schnittmenge mit echter Basis" "alpha" \
   "$(cd "$REPO" && PACKAGES='alpha beta gamma' $RUN HEAD~1 2>/dev/null)"
+
+# I-2: setup.cfg allein muss als Paketkriterium reichen (build-sdist.sh kann
+# damit bauen). Eigenes, isoliertes Mini-Repo statt des Haupt-Fixtures, damit
+# kein zusaetzlicher Paketordner die "alles bauen"-Assertions oben
+# verfaelscht.
+SETUPCFG_REPO="${TMP}/setupcfg-repo"
+mkdir -p "${SETUPCFG_REPO}/nurcfg"
+printf '[metadata]\nname = nurcfg\n' > "${SETUPCFG_REPO}/nurcfg/setup.cfg"
+(
+  cd "$SETUPCFG_REPO"
+  git init -q -b main
+  git config user.email test@example.com
+  git config user.name Test
+  git add -A
+  git commit -q -m "init"
+  echo "version = 1.0" >> nurcfg/setup.cfg
+  git add -A
+  git commit -q -m "aenderung an setup.cfg"
+) >/dev/null
+assert_eq "setup.cfg allein wird als Paket erkannt" "nurcfg" \
+  "$(cd "$SETUPCFG_REPO" && bash "$SCRIPTS/changed-packages.sh" HEAD~1)"
 
 echo
 echo "=== vars/pyMonorepo.groovy ==="

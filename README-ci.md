@@ -80,10 +80,13 @@ erreichbar oder fehlen die Rechte, wird nur gewarnt. Abschalten mit
 ## Welche Pakete werden gebaut
 
 `changed-packages.sh` erkennt Pakete als Top-Level-Ordner mit `pyproject.toml`,
-`setup.py` oder `__init__.py`. Feste Liste stattdessen:
+`setup.py` oder `setup.cfg` - genau das, was `build-sdist.sh` auch bauen kann.
+Ein Top-Level-Ordner mit nur einer `__init__.py` (z. B. `tests/` oder
+`scripts/` mit Testhelfern) zaehlt bewusst nicht als Paket. Feste Liste
+stattdessen:
 
     packages = 'paket1 paket2'                                        // im Jenkinsfile
-    PACKAGES="paket1 paket2" bash resources/de/firma/ci/changed-packages.sh <base>     // lokal
+    PACKAGES="paket1 paket2" bash resources/de/firma/ci/changed-packages.sh <base>     # lokal
 
 Gebaut wird die Schnittmenge aus "ist ein Paket" und "liegt im `git diff` seit
 dem letzten erfolgreichen Build". Drei Sonderfaelle bauen absichtlich alles:

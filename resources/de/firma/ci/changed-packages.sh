@@ -4,7 +4,10 @@
 #   changed-packages.sh <base>
 #
 # Ein Paket ist ein Top-Level-Ordner mit pyproject.toml, setup.py oder
-# __init__.py. Statt der Auto-Erkennung eine feste Liste:
+# setup.cfg - genau das, was build-sdist.sh auch bauen kann (kein
+# __init__.py: das war ein Erbe der alten RAW/tar.gz-Generation, siehe
+# Nachtrag in docs/superpowers/specs/2026-09-03-pymonorepo-shared-library-design.md).
+# Statt der Auto-Erkennung eine feste Liste:
 #
 #   PACKAGES="paket1 paket2" changed-packages.sh <base>
 #
@@ -45,7 +48,7 @@ all_packages() {
   local d
   for d in */; do
     d="${d%/}"
-    if [[ -f "$d/pyproject.toml" || -f "$d/setup.py" || -f "$d/__init__.py" ]]; then
+    if [[ -f "$d/pyproject.toml" || -f "$d/setup.py" || -f "$d/setup.cfg" ]]; then
       printf '%s\n' "$d"
     fi
   done | sort -u

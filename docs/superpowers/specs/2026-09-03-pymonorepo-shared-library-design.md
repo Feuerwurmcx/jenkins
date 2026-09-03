@@ -148,7 +148,9 @@ Neu zu schreiben, Verhalten nach der bisherigen README-Beschreibung:
 
     changed-packages.sh <base>          # gibt Paketnamen zeilenweise auf stdout
 
-* Ein Paket ist ein Top-Level-Ordner mit `pyproject.toml`, `setup.py` oder `__init__.py`.
+* Ein Paket ist ein Top-Level-Ordner mit `pyproject.toml`, `setup.py` oder
+  `setup.cfg` - genau das, was `build-sdist.sh` bauen kann (siehe Nachtrag
+  vom 2026-09-03 am Ende dieses Dokuments).
 * `PACKAGES="a b c"` ersetzt die Auto-Erkennung durch eine feste Liste.
 * Ausgegeben wird die Schnittmenge aus „ist ein Paket" und „liegt im `git diff` seit `<base>`".
 * Alles bauen, wenn: `<base>` leer oder kein gueltiger Commit; oder wenn `ci/`
@@ -230,3 +232,34 @@ auch im `git diff` nicht. `.ci-lib` bleibt also richtig — nur nicht aus dem
 Grund, der hier zuerst stand.
 
 Im Monorepo gehoert `.ci-lib/` in die `.gitignore`.
+
+## Nachtrag 2026-09-03: `__init__.py` als Paketkriterium gestrichen
+
+Beim Abschluss-Review (I-2) fiel auf, dass `changed-packages.sh` und
+`build-sdist.sh` unterschiedliche Paketbegriffe hatten: `changed-packages.sh`
+erkannte einen Top-Level-Ordner mit `pyproject.toml`, `setup.py` **oder
+`__init__.py`** als Paket, `build-sdist.sh` verlangt fuer eine sdist aber
+zwingend `setup.py`, `setup.cfg` oder `pyproject.toml`. Ein Top-Level-Ordner
+mit nur `__init__.py` (in einem Monorepo ueblich fuer z. B. `tests/` oder
+`scripts/`) wurde deshalb als geaenderter "Paket" gemeldet, liess den
+nachfolgenden `build-sdist.sh`-Aufruf aber mit "keine Paket-Metadaten"
+abbrechen.
+
+`__init__.py` war ein Erbe der alten RAW/tar.gz-Generation, die dieser Umbau
+ersetzt: `pack.sh` tarte dort jeden Ordner mit einer `__init__.py` (jeder
+Python-Ordner war ein gueltiges RAW-Artefakt, es gab keine sdist-Metadaten,
+die etwas anderes verlangt haetten). Die urspruengliche Spec (Abschnitt
+"changed-packages.sh" oben) hat dieses Kriterium unveraendert aus dem
+damaligen README uebernommen, ohne zu pruefen, ob es zum neuen
+sdist-Baustein noch passt - fuer eine echte sdist ist es das falsche
+Kriterium.
+
+Entscheidung: `__init__.py` wird als Paketkriterium gestrichen.
+`changed-packages.sh` erkennt ein Paket jetzt nur noch an `pyproject.toml`,
+`setup.py` oder `setup.cfg` - deckungsgleich mit dem, was `build-sdist.sh`
+tatsaechlich bauen kann. Ein reiner `__init__.py`-Ordner wird dadurch bei
+Aenderung nicht mehr gemeldet und bricht die Pipeline nicht mehr faelschlich
+ab. Wer aus der alten RAW-Generation migriert, sollte den Vergleichsbuild aus
+"Migration eines Monorepos" Schritt 4 deshalb auch auf diese Verhaltensaenderung
+hin pruefen: ein reiner `__init__.py`-Ordner, der frueher (RAW) mitgebaut
+wurde, wird jetzt uebersprungen.

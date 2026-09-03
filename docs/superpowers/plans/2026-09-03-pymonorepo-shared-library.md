@@ -658,7 +658,7 @@ def call(Closure body) {
                     script {
                         // Ueber env statt ueber eine lokale Variable: der Pfad wird in
                         // einer spaeteren Stage und im post-Block wieder gebraucht.
-                        env.PYMONOREPO_SCRIPTS = materializeScripts()
+                        env.CI_LIB_DIR = materializeScripts()
 
                         // Basis fuer den Diff: letzter erfolgreicher Build (Git-Plugin
                         // setzt das), sonst HEAD~1, sonst leer -> alles bauen.
@@ -669,7 +669,7 @@ def call(Closure body) {
                         def out
                         withEnv(["PACKAGES=${cfg.packages}"]) {
                             out = sh(returnStdout: true, script:
-                                "bash ${env.PYMONOREPO_SCRIPTS}/changed-packages.sh '${base}'").trim()
+                                "bash ${env.CI_LIB_DIR}/changed-packages.sh '${base}'").trim()
                         }
                         env.CHANGED = out
                         def pkgs = out ? out.split('\n') as List : []
@@ -691,7 +691,7 @@ def call(Closure body) {
                 when { expression { env.CHANGED?.trim() } }
                 steps {
                     script {
-                        def dir  = env.PYMONOREPO_SCRIPTS
+                        def dir  = env.CI_LIB_DIR
                         def pkgs = env.CHANGED.trim().split('\n') as List
                         def versions = [:]   // CPS-Branches laufen kooperativ, kein Sync noetig
 
@@ -751,8 +751,8 @@ def call(Closure body) {
             cleanup {
                 sh 'rm -rf dist'
                 script {
-                    if (env.PYMONOREPO_SCRIPTS) {
-                        sh "rm -rf '${env.PYMONOREPO_SCRIPTS}'"
+                    if (env.CI_LIB_DIR) {
+                        sh "rm -rf '${env.CI_LIB_DIR}'"
                     }
                 }
             }
@@ -772,12 +772,14 @@ def call(Closure body) {
 // Aufgerufen wird immer als 'bash <pfad>': writeFile setzt kein
 // Ausfuehrbar-Bit, und der Umweg ueber bash macht das auch unnoetig.
 private String materializeScripts(String targetDir = '.ci-lib') {
-    String dir = targetDir
-    ['changed-packages.sh', 'build-sdist.sh', 'sdist-meta.sh', 'publish-pypi.sh'].each { n ->
-        writeFile file: "${dir}/${n}", text: libraryResource("de/firma/ci/${n}")
+    List names = ['changed-packages.sh', 'build-sdist.sh', 'sdist-meta.sh', 'publish-pypi.sh']
+    names.each { n ->
+        writeFile file: "${targetDir}/${n}",
+                  text: libraryResource("de/firma/ci/${n}"),
+                  encoding: 'UTF-8'
     }
-    echo "Skripte aus der Library nach ${dir} geschrieben"
-    return dir
+    echo "Skripte nach ${targetDir}/ geschrieben: ${names.join(', ')}"
+    return targetDir
 }
 EOF
 ```

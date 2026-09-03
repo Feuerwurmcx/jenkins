@@ -21,9 +21,25 @@ shopt -s nullglob
 BASE="${1:-}"
 
 all_packages() {
+  # PACKAGES gesetzt, aber leer (PACKAGES=""): faellt bewusst auf die
+  # Auto-Erkennung unten zurueck, nicht auf eine leere Liste. Das ist keine
+  # Anforderung der Spec, aber vertretbar - hier festgehalten, damit es
+  # niemanden ueberrascht.
   if [[ -n "${PACKAGES:-}" ]]; then
-    # Absichtlich ohne Quotes: PACKAGES ist eine durch Leerzeichen getrennte Liste.
-    printf '%s\n' ${PACKAGES} | sort -u
+    # read -ra statt unquotierter Expansion ("printf '%s\n' ${PACKAGES}"):
+    # PACKAGES ist eine FESTE Liste, kein Glob-Muster. Mit der unquotierten
+    # Variante griff das globale 'shopt -s nullglob' (siehe oben) auch hier
+    # zu: PACKAGES='nomatch[x]' verschwand spurlos, PACKAGES='al*' wurde zu
+    # 'alpha' expandiert. read -ra fuehrt nur Wortaufteilung durch, keine
+    # Pfadnamen-Expansion.
+    local -a pkgs
+    read -ra pkgs <<<"${PACKAGES}"
+    # Bash 3.2: "${pkgs[@]}" bricht unter 'set -u' mit "unbound variable" ab,
+    # wenn das Array leer ist (z. B. PACKAGES bestand nur aus Leerzeichen).
+    # Deshalb erst die Laenge pruefen, bevor das Array expandiert wird.
+    if [[ ${#pkgs[@]} -gt 0 ]]; then
+      printf '%s\n' "${pkgs[@]}" | sort -u
+    fi
     return
   fi
   local d
@@ -46,7 +62,16 @@ if ! usable_base; then
   exit 0
 fi
 
-CHANGED_FILES="$(git diff --name-only "$BASE" HEAD)"
+# core.quotepath=false: git quotet Pfade mit Nicht-ASCII-Zeichen sonst als
+# Oktal-Escape in Anfuehrungszeichen (z. B. "alpha/\303\274bersetzung.txt").
+# "cut -d/ -f1" macht daraus '"alpha' statt 'alpha' - passt gegen keinen
+# Paketnamen, das Paket verschwindet lautlos. In einem deutschsprachigen
+# Repo (Umlaute in Dateinamen) ist das kein Randfall.
+# --no-renames: ohne dieses Flag meldet git bei "git mv alpha/x.py
+# beta/x.py" wegen der Rename-Erkennung nur den neuen Pfad - alpha verliert
+# eine Datei, wird aber nicht als geaendert erkannt. Mit --no-renames
+# erscheinen alter und neuer Pfad als je eigene Zeile.
+CHANGED_FILES="$(git -c core.quotepath=false diff --no-renames --name-only "$BASE" HEAD)"
 
 if grep -qE '^(ci/|Jenkinsfile$)' <<<"$CHANGED_FILES"; then
   echo "HINWEIS: CI-Konfiguration geaendert - baue alle Pakete" >&2

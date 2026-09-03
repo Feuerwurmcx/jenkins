@@ -179,6 +179,33 @@ assert_eq "PACKAGES-Override" "gamma" \
 assert_contains "Hinweis auf stderr" \
   "$(cd "$REPO" && $RUN '' 2>&1 >/dev/null)" "baue alle Pakete"
 
+# Umlaut in Dateiname darf das Paket nicht verschlucken. git quotet
+# Nicht-ASCII-Pfade ohne core.quotepath=false in Anfuehrungszeichen; ohne
+# den Fix macht "cut -d/ -f1" daraus '"alpha' statt 'alpha', und das Paket
+# faellt lautlos aus der Ausgabe.
+( cd "$REPO" && echo "x" > "alpha/übersetzung.txt" && git add -A && git commit -q -m "umlaut" )
+assert_eq "Umlaut-Datei wird gemeldet" "alpha" \
+  "$(cd "$REPO" && $RUN HEAD~1)"
+
+# PACKAGES mit Sonderzeichen darf nicht durch das globale 'shopt -s nullglob'
+# des Skripts verschwinden. Leere Basis, damit direkt all_packages() greift
+# und kein anderer Codepfad das Ergebnis verfaelscht.
+assert_eq "PACKAGES mit Sonderzeichen bleibt erhalten" "nomatch[x]" \
+  "$(cd "$REPO" && PACKAGES='nomatch[x]' $RUN '' 2>/dev/null)"
+
+# PACKAGES mit Glob-Zeichen muss literal bleiben, nicht expandiert werden -
+# PACKAGES ist eine FESTE Liste, kein Muster.
+assert_eq "PACKAGES mit Glob-Zeichen bleibt literal" "al*" \
+  "$(cd "$REPO" && PACKAGES='al*' $RUN '' 2>/dev/null)"
+
+# Schnittmenge mit echter Basis: der leere-Basis-Zweig oben umgeht die
+# Filterschleife komplett (all_packages() geht dort ungefiltert durch). Erst
+# mit echter Basis und mehreren PACKAGES-Eintraegen, von denen nur einer
+# tatsaechlich geaendert wurde, wird die Schnittmenge wirklich geprueft.
+( cd "$REPO" && echo "x" >> alpha/neu.py && git add -A && git commit -q -m "alpha fuer packages" )
+assert_eq "PACKAGES-Schnittmenge mit echter Basis" "alpha" \
+  "$(cd "$REPO" && PACKAGES='alpha beta gamma' $RUN HEAD~1 2>/dev/null)"
+
 echo
 echo "=== Bilanz ==="
 printf 'PASS %d  FAIL %d  SKIP %d\n' "$PASS" "$FAIL" "$SKIP"

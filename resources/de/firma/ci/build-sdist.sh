@@ -36,7 +36,15 @@ else
   ( cd "$PKG" && python3 setup.py --quiet sdist --dist-dir "$STAGE" ) >&2
 fi
 
-mapfile -t BUILT < <(find "$STAGE" -maxdepth 1 -name '*.tar.gz' -print)
+# Kein 'mapfile': das ist ein Bash-4-Builtin und existiert unter macOS'
+# /bin/bash 3.2 nicht (rc 127). Stattdessen portabel per -print0/read -d ''
+# in einer Prozess-Substitution (keine Pipe, sonst liefe die Schleife wegen
+# 'set -o pipefail' in einer Subshell und BUILT bliebe danach leer) fuellen -
+# das funktioniert auch bei Dateinamen mit Leerzeichen.
+BUILT=()
+while IFS= read -r -d '' f; do
+  BUILT+=("$f")
+done < <(find "$STAGE" -maxdepth 1 -name '*.tar.gz' -print0)
 if [[ ${#BUILT[@]} -ne 1 ]]; then
   echo "FEHLER: erwartet genau eine sdist in $PKG, gefunden: ${#BUILT[@]}" >&2
   exit 1

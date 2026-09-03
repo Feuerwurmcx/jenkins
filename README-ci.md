@@ -1,155 +1,150 @@
-# Jenkins-Build: 10 Python-Pakete -> tar.gz -> Nexus (raw)
+# ci-shared: Jenkins Shared Library fuer Python-Monorepos
 
-## Dateien
+Ermittelt die geaenderten Pakete eines Monorepos, baut je eine sdist und laedt
+sie in ein Nexus-PyPI-**hosted**-Repo.
 
-    Jenkinsfile
-    ci/changed-packages.sh   welche Top-Level-Ordner haben sich geändert
-    ci/version-of.sh         Version eines Pakets aus setup.py / setup.cfg
-    ci/pack.sh               ein Ordner -> dist/<paket>-<version>.tar.gz
-    ci/upload-nexus.sh       curl PUT ins Nexus-RAW-Repo
+## Aufbau
 
-Die vier Skripte sind eigenständig und lokal testbar – der Jenkinsfile ruft nur auf.
+    vars/pyMonorepo.groovy                 die Pipeline
+    resources/de/firma/ci/
+        changed-packages.sh                welche Top-Level-Ordner haben sich geaendert
+        build-sdist.sh                     ein Ordner -> dist/<name>-<version>.tar.gz (echte sdist)
+        sdist-meta.sh                      Name/Version aus der PKG-INFO der sdist
+        publish-pypi.sh                    twine-Upload ins PyPI-hosted-Repo
+    examples/Jenkinsfile                   Vorlage fuer die Wurzel eines Monorepos
+    test/run-tests.sh                      Testtreiber
+
+Die vier Skripte sind eigenstaendig und lokal testbar; die Pipeline ruft nur
+auf. Sie liegen in `resources/` und werden zur Laufzeit per `libraryResource`
+auf den Agent geschrieben - ein Monorepo braucht deshalb keinen `ci/`-Ordner.
 
 ## Einmalige Einrichtung
 
-1. Nexus: RAW-Repo anlegen (hosted, Deployment policy „Allow redeploy" nur wenn gewünscht).
-2. Jenkins: Credential vom Typ *Username with password* mit der ID `nexus-raw-deploy`.
-3. Im `Jenkinsfile` `NEXUS_URL` und `NEXUS_REPO` anpassen.
-4. Job als *Multibranch Pipeline* oder *Pipeline from SCM* anlegen – wichtig, damit
-   `GIT_PREVIOUS_SUCCESSFUL_COMMIT` gesetzt wird.
+1. Nexus: PyPI-Repo vom Typ **hosted** anlegen. Group-Repos nehmen keine
+   Uploads an, die sind nur zum Lesen da
+   (`pip install -i .../repository/<group>/simple/`).
+2. Jenkins: Credential vom Typ *Username with password* mit der ID
+   `nexus-pypi-deploy`.
+3. Jenkins: Manage Jenkins -> System -> Global Pipeline Libraries, dieses Repo
+   unter dem Namen `ci-shared` eintragen.
+4. Im Monorepo `examples/Jenkinsfile` als `Jenkinsfile` in die Wurzel legen und
+   `nexusUrl` sowie `hostedRepo` anpassen.
+5. Job als *Multibranch Pipeline* oder *Pipeline from SCM* anlegen - wichtig,
+   damit `GIT_PREVIOUS_SUCCESSFUL_COMMIT` gesetzt wird.
 
-## Ablageschema in Nexus
+## Konfiguration
 
-    <NEXUS_URL>/repository/<NEXUS_REPO>/<paket>/<version>/<paket>-<version>.tar.gz
+| Schluessel | Pflicht | Default | Bedeutung |
+|---|---|---|---|
+| `nexusUrl` | ja | -- | Basis-URL der Nexus-Instanz |
+| `hostedRepo` | nein | `pypi-hosted` | HOSTED-Repo, nie die Group |
+| `credentialsId` | nein | `nexus-pypi-deploy` | Username/Password-Credential |
+| `packages` | nein | `''` | Feste Paketliste; leer heisst Auto-Erkennung |
+| `keepBuilds` | nein | `30` | wie viele Builds aufgehoben werden |
 
-Die Version kommt aus dem jeweiligen Paket, nicht aus Git oder der Build-Nummer:
-jedes der 10 Pakete wird mit seiner eigenen Version veröffentlicht.
+Fehlt `nexusUrl`, bricht die Pipeline sofort ab statt erst beim Upload.
 
 ## Woher die Version kommt
 
-`ci/version-of.sh <paket>` liest sie **statisch**, in dieser Reihenfolge:
+Aus der `PKG-INFO` der **gebauten** sdist, nicht aus dem Ordnernamen und nicht
+aus dem Dateinamen. Beides kann abweichen, weil setuptools normalisiert:
 
-| Quelle | Beispiel |
-|---|---|
-| `setup.py`, Literal | `setup(name="alpha", version="1.2.3")` |
-| `setup.py`, lokale Variable | `__version__ = "0.9.0rc1"` … `version=__version__` |
-| `setup.py`, Variable aus dem Paketmodul | `from gamma import __version__` -> `gamma/__init__.py` |
-| `setup.cfg` | `[metadata]` / `version = 3.4.5` |
-| `setup.cfg` mit `attr:` | `version = attr: epsilon.__version__` |
+    Ordner  alpha    name="Mein.Tolles_Paket"  ->  mein_tolles_paket-...
+    Version 1.0-1                              ->  1.0.post1  (PEP 440)
 
-Gesucht wird `__version__` in `__init__.py`, `_version.py`, `version.py` – im
-Paketwurzelverzeichnis und eine Ebene tiefer.
-
-Statisch heißt: die Datei wird geparst, nicht ausgeführt. Das ist im CI die
-robustere Variante, weil `python setup.py` sonst Importe zur Build-Zeit braucht,
-die zur Laufzeit gar nicht relevant sind. Wird die Version dynamisch berechnet
-(z.B. aus einem Datum oder einer Git-Abfrage), scheitert das Skript mit einer
-klaren Meldung – dann bewusst freischalten:
-
-    ALLOW_SETUP_EXEC=1 ci/version-of.sh mein_paket    # ruft python setup.py --version
-
-Suffix anhängen, falls doch mal Build-Metadaten in den Dateinamen sollen:
-
-    VERSION_SUFFIX="+b${BUILD_NUMBER}" ci/pack.sh mein_paket
+Ausserdem duerfen Paketnamen selbst Bindestriche enthalten - den Dateinamen zu
+zerlegen waere also mehrdeutig. `build-sdist.sh` gibt den tatsaechlichen Pfad
+aus, `sdist-meta.sh` liest Name und Version aus der `PKG-INFO`.
 
 ## Doppelte Versionen
 
-Weil die Version aus `setup.py` kommt, ist „zweimal dieselbe Version hochladen"
-fast immer ein vergessener Version-Bump. `ci/upload-nexus.sh` prüft deshalb vor
-dem PUT per HEAD, ob die Datei schon in Nexus liegt, und bricht mit Exit-Code 2
-ab. Gewollter Redeploy: Build-Parameter `ALLOW_REDEPLOY` bzw. `ALLOW_REDEPLOY=1`.
+Weil die Version aus dem Paket kommt, ist "zweimal dieselbe Version hochladen"
+fast immer ein vergessener Version-Bump. Ein PyPI-hosted-Repo lehnt das mit 400
+ab; `publish-pypi.sh` erkennt das und bricht mit Exit-Code 2 und klarer Meldung
+ab, statt einen Infrastrukturfehler zu melden.
+
+`publish-pypi.sh` prueft ausserdem vorab ueber die Nexus-REST-API, ob
+`NEXUS_PYPI_HOSTED` wirklich ein hosted-PyPI-Repo ist (Exit 3 bei group oder
+proxy). Ist die API nicht erreichbar oder fehlen die Rechte, wird nur gewarnt.
+Abschalten mit `SKIP_REPO_CHECK=1`.
 
 ## Welche Pakete werden gebaut
 
-`ci/changed-packages.sh` erkennt Pakete als Top-Level-Ordner mit `pyproject.toml`,
+`changed-packages.sh` erkennt Pakete als Top-Level-Ordner mit `pyproject.toml`,
 `setup.py` oder `__init__.py`. Feste Liste stattdessen:
 
-    PACKAGES="paket1 paket2 ..." ci/changed-packages.sh <base>
+    packages = 'paket1 paket2'      // im Jenkinsfile
+    PACKAGES="paket1 paket2" changed-packages.sh <base>     // lokal
 
-Gebaut wird die Schnittmenge aus „ist ein Paket" und „liegt im `git diff` seit dem
-letzten erfolgreichen Build". Zwei Sonderfälle bauen absichtlich alles:
+Gebaut wird die Schnittmenge aus "ist ein Paket" und "liegt im `git diff` seit
+dem letzten erfolgreichen Build". Drei Sonderfaelle bauen absichtlich alles:
 
-* kein gültiger Basis-Commit (erster Build, neuer Branch, History gepruned)
-* `ci/` oder `Jenkinsfile` wurden geändert
+* kein gueltiger Basis-Commit (erster Build, neuer Branch, History gepruned)
+* `ci/` oder `Jenkinsfile` wurden geaendert
+* Build mit Parameter `BUILD_ALL`
 
-Manuell erzwingen: Build mit Parameter `BUILD_ALL`.
+Nur bauen, nicht hochladen: Build-Parameter `SKIP_UPLOAD`.
 
 ## Lokal testen
 
-    ci/changed-packages.sh HEAD~1
-    ci/version-of.sh mein_paket
-    ci/pack.sh mein_paket                 # Version aus dem Paket
-    ci/pack.sh mein_paket 0.0.1-test      # Version explizit überschreiben
+Der Testtreiber laeuft ohne Netzwerk und meldet, was er mangels Werkzeug nicht
+pruefen konnte, als SKIP:
+
+    test/run-tests.sh
+
+Einzelne Skripte von Hand, aus der Wurzel eines Monorepos:
+
+    S=resources/de/firma/ci
+    bash $S/changed-packages.sh HEAD~1
+    bash $S/build-sdist.sh mein_paket           # gibt den Archivpfad aus
+    bash $S/sdist-meta.sh dist/mein_paket-1.2.3.tar.gz name
     tar tzf dist/mein_paket-*.tar.gz | head
 
-    NEXUS_URL=... NEXUS_REPO=... NEXUS_USER=... NEXUS_PASS=... \
-      ci/upload-nexus.sh dist/mein_paket-1.2.3.tar.gz mein_paket 1.2.3
-
-Alle Versionen auf einen Blick:
-
-    for p in */; do printf '%-20s ' "${p%/}"; ci/version-of.sh "${p%/}" || true; done
-
-## Troubleshooting: „Permission denied" beim Skriptaufruf
-
-Das Ausführbar-Bit steckt im Git-Index, nicht in der Datei. Fehlt es (Datei per
-Download hinzugefügt, Windows-Checkout, `core.fileMode=false`), scheitert der
-direkte Aufruf im Workspace.
-
-Der Jenkinsfile ruft die Skripte deshalb als `bash ci/<skript>.sh` auf – das
-funktioniert unabhängig vom Dateimodus. Zusätzlich das Bit dauerhaft ins Repo
-setzen:
-
-    git update-index --chmod=+x ci/*.sh
-    git commit -m "ci: Skripte ausfuehrbar machen"
-    git push
-
-Prüfen (erwartet `100755`, nicht `100644`):
-
-    git ls-files -s ci/
-
-Bei Windows-Clients zusätzlich sicherstellen, dass die Zeilenenden LF bleiben –
-CRLF im Shebang führt zu `bad interpreter: /usr/bin/env bash^M`. In `.gitattributes`:
-
-    ci/*.sh text eol=lf
+    NEXUS_URL=... NEXUS_PYPI_HOSTED=... NEXUS_USER=... NEXUS_PASS=... \
+      bash $S/publish-pypi.sh dist/mein_paket-1.2.3.tar.gz
 
 ## Umgang mit den Zugangsdaten
 
-Drei Stellen, an denen Nexus-Credentials üblicherweise auslaufen – und wie es
-hier gelöst ist:
+Drei Stellen, an denen Nexus-Credentials ueblicherweise auslaufen - und wie es
+hier vermieden wird.
 
-**1. `environment { X = credentials(...) }`** bindet das Secret für die *gesamte*
-Pipeline, also auch für Schritte, die es nichts angeht (Checkout, Tests, jedes
-`sh`). Deshalb steht im `environment`-Block nur die Credential-*ID*; gebunden
-wird per `withCredentials` direkt um den einen Upload-Schritt.
+**1. `environment { X = credentials(...) }`** bindet das Secret fuer die
+*gesamte* Pipeline, also auch fuer jeden Schritt, den es nichts angeht. Deshalb
+bindet `pyMonorepo` es per `withCredentials` direkt um den einen Upload-Schritt.
 
-**2. Interpolation in Groovy-Strings** – `sh "... ${env.NEXUS_CRED_PSW} ..."`
-schreibt das Klartext-Passwort in den Groovy-String, bevor Jenkins es maskieren
-kann. Jenkins warnt darüber explizit („a secret was passed to an insecure Groovy
-String"). Hier wird nichts interpoliert: `withCredentials` legt `NEXUS_USER` /
-`NEXUS_PASS` in die Umgebung, das Shell-Skript liest sie selbst.
+**2. Interpolation in Groovy-Strings.** Steht ein Secret in einem
+Groovy-String, landet es im Prozessaufruf und damit potenziell im Log; Jenkins
+warnt darueber explizit ("a secret was passed to an insecure Groovy String").
+Hier wird nichts interpoliert: `withCredentials` legt `NEXUS_USER` und
+`NEXUS_PASS` in die Umgebung, `publish-pypi.sh` liest sie von dort.
 
-**3. `curl --user u:p`** – Argumente stehen in der Prozessliste. Jeder andere
-Prozess auf dem Agent (anderer Job, anderer Container-User) sieht das Passwort
-per `ps aux`. `ci/upload-nexus.sh` übergibt die Auth deshalb über
-`curl --config -` via stdin: nie in argv, nie im Log. Sonderzeichen in
-Passwörtern (`"`, `\`, `$`, Backticks) werden für das curl-Config-Format
-escaped und nicht von der Shell interpretiert.
+Das gilt nicht nur fuer das Secret: seit der `pyMonorepo`-Pipeline landet
+ueberhaupt kein Laufzeitwert mehr per String-Interpolation in einem
+`sh`-Aufruf. Paketname (`PKG`), Archivpfad (`ARCHIVE`) und Basis-Commit
+(`BASE`) kommen alle per `withEnv` in die Umgebung; die `sh`-Skripte selbst
+sind einfach gequotete String-Literale, die die Werte ueber `"$PKG"` &co.
+lesen. Der Grund ist derselbe wie beim Secret, gilt hier aber zusaetzlich
+gegen Befehlseinschleusung: `pkg` ist ein Top-Level-Ordnername aus dem
+Monorepo und damit von jedem Branch aus kontrollierbar. Stuende er per
+`"...${pkg}..."` im Groovy-String, koennte ein Ordnername wie
+`x'; echo INJECTED >&2; '` einen zusaetzlichen Shell-Befehl einschleusen. Ueber
+`withEnv` und ein gequotetes `"$PKG"` bleibt er ein einzelnes Argument, egal
+welche Anfuehrungszeichen oder Sonderzeichen er enthaelt.
 
-Zusätzlich setzt das Skript `set +x`, damit ein aufrufendes Skript mit xtrace die
-Werte nicht doch noch ins Log schreibt.
+**3. argv.** `publish-pypi.sh` reicht die Zugangsdaten ueber
+`TWINE_USERNAME`/`TWINE_PASSWORD` weiter, nicht als Kommandozeilenargument -
+sonst stuenden sie in der Prozessliste. Der Repo-Typ-Check nutzt aus demselben
+Grund `curl --config -`.
 
-Wenn ihr Secrets ganz aus der Job-Konfiguration heraushalten wollt, ist der
-nächste Schritt ein Nexus-Token pro Team statt eines Deploy-Users, hinterlegt als
+Wollt ihr Secrets ganz aus der Job-Konfiguration heraushalten, ist der naechste
+Schritt ein Nexus-Token pro Team statt eines Deploy-Users, hinterlegt als
 Jenkins-Credential mit Folder-Scope statt global.
 
-## Hinweise
+## Migration eines bestehenden Monorepos
 
-* `ci/pack.sh` erzeugt reproduzierbare Archive (`--sort=name`, feste mtime/uid/gid),
-  gleicher Input => byte-identische Datei.
-* Ausgeschlossen sind `__pycache__`, `*.pyc`, Test-/Lint-Caches, `.venv`, `*.egg-info`.
-* `upload-nexus.sh` prüft nach dem PUT per HEAD, ob die Datei wirklich liegt – ein
-  Nexus, der mit 200 antwortet aber nichts schreibt (falsche Repo-ID), fällt so auf.
-* Ein fehlgeschlagenes Paket lässt die anderen parallelen Zweige weiterlaufen, der
-  Build wird trotzdem rot.
-* Die Build-Beschreibung in Jenkins listet am Ende `paket version` für alles,
-  was in diesem Lauf veröffentlicht wurde.
+1. Library in Jenkins als `ci-shared` registrieren (siehe Einrichtung).
+2. `Jenkinsfile` durch die Vorlage aus `examples/` ersetzen.
+3. `ci/` im Monorepo loeschen, `.ci-lib/` in die `.gitignore` aufnehmen -
+   dorthin schreibt die Library die Skripte zur Laufzeit.
+4. Einmal mit `SKIP_UPLOAD` bauen und die Paketliste im Log gegen den alten
+   Build vergleichen.

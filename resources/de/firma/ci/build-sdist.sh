@@ -3,8 +3,9 @@
 #
 #   build-sdist.sh <paket>        -> gibt den Archivpfad auf stdout aus
 #
-# Unterschied zu pack.sh: `tar czf` erzeugt ein beliebiges Archiv. Ein PyPI-Repo
-# braucht eine sdist mit PKG-INFO und dem Wurzelverzeichnis <name>-<version>/.
+# Unterschied zu einem einfachen `tar czf`: das erzeugt ein beliebiges Archiv.
+# Ein PyPI-Repo braucht eine sdist mit PKG-INFO und dem Wurzelverzeichnis
+# <name>-<version>/.
 #
 # WICHTIG: Der Dateiname der sdist kommt aus den Metadaten, nicht aus dem
 # Ordnernamen. Beides kann abweichen:

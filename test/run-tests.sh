@@ -29,6 +29,10 @@ assert_rc() {   # <name> <erwarteter rc> <ist rc>
   if [[ "$2" == "$3" ]]; then ok "$1"; else nok "$1" "erwartet rc=$2, ist rc=$3"; fi
 }
 assert_contains() {  # <name> <haystack> <needle>
+  # Absicherung: eine leere Nadel passt mit *""* auf jeden Haystack und waere
+  # sonst immer gruen, ohne irgendetwas zu pruefen. Das muss als Fehler
+  # gemeldet werden, nicht als stiller Treffer.
+  if [[ -z "$3" ]]; then nok "$1" "Nadel ist leer - Assertion prueft nichts"; return; fi
   if [[ "$2" == *"$3"* ]]; then ok "$1"; else nok "$1" "[$3] fehlt in: $2"; fi
 }
 
@@ -111,12 +115,12 @@ fi
 echo
 echo "=== publish-pypi.sh ==="
 OUT="$(bash "$SCRIPTS/publish-pypi.sh" 2>&1)"; RC=$?
-if [[ $RC -ne 0 ]]; then ok "ohne Argument -> rc != 0"; else nok "ohne Argument -> rc != 0" "rc=0"; fi
+assert_rc "ohne Argument -> rc 1" 1 "$RC"
 assert_contains "ohne Argument -> Meldung" "$OUT" "archiv fehlt"
 
 OUT="$(NEXUS_URL= NEXUS_PYPI_HOSTED= NEXUS_USER= NEXUS_PASS= \
        bash "$SCRIPTS/publish-pypi.sh" "$ARCHIVE" 2>&1)"; RC=$?
-if [[ $RC -ne 0 ]]; then ok "ohne NEXUS_URL -> rc != 0"; else nok "ohne NEXUS_URL -> rc != 0" "rc=0"; fi
+assert_rc "ohne NEXUS_URL -> rc 1" 1 "$RC"
 assert_contains "ohne NEXUS_URL -> Meldung" "$OUT" "NEXUS_URL fehlt"
 
 OUT="$(NEXUS_URL=https://nexus.invalid NEXUS_PYPI_HOSTED= NEXUS_USER=u NEXUS_PASS=p \

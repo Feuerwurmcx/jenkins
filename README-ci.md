@@ -18,6 +18,25 @@ Die vier Skripte sind eigenstaendig und lokal testbar; die Pipeline ruft nur
 auf. Sie liegen in `resources/` und werden zur Laufzeit per `libraryResource`
 auf den Agent geschrieben - ein Monorepo braucht deshalb keinen `ci/`-Ordner.
 
+## Voraussetzungen auf dem Agent
+
+Die Skripte rufen nichts auf, was nicht ohnehin schon da sein muss - aber
+folgendes muss auf dem Jenkins-Agent installiert sein, bevor der erste Build
+laeuft:
+
+* `bash` (die Skripte selbst; `/bin/bash` reicht, auch die alte 3.2 von macOS)
+* `git` (`changed-packages.sh`)
+* `tar` (`build-sdist.sh`, `sdist-meta.sh`)
+* `curl` (`publish-pypi.sh`, Repo-Typ-Check gegen die Nexus-REST-API)
+* `python3` mit `build` (`python3 -m pip install --user build`) oder ersatzweise
+  `setuptools` (`build-sdist.sh` faellt sonst auf `setup.py sdist` zurueck)
+* das Python-Modul `twine` (`python3 -m pip install --user twine`,
+  `publish-pypi.sh`)
+
+Fehlt `twine`, scheitert nicht die Einrichtung, sondern erst der erste
+Upload-Schritt mit `No module named twine` - am besten vorher pruefen statt
+das im ersten produktiven Build zu entdecken.
+
 ## Einmalige Einrichtung
 
 1. Nexus: PyPI-Repo vom Typ **hosted** anlegen. Group-Repos nehmen keine

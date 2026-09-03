@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Liest Name/Version aus der PKG-INFO einer gebauten sdist.
 #
-#   ci/sdist-meta.sh <archiv> [name|version]     (default: version)
+#   sdist-meta.sh <archiv> [name|version]     (default: version)
 #
 # Zuverlässiger als den Dateinamen zu zerlegen: setuptools normalisiert Name
 # und Version, und Paketnamen dürfen selbst Bindestriche enthalten.
@@ -18,8 +18,13 @@ case "$FIELD" in
   *) echo "FEHLER: Feld muss 'name' oder 'version' sein" >&2; exit 1 ;;
 esac
 
-VALUE="$(tar xzOf "$ARCHIVE" --wildcards '*/PKG-INFO' 2>/dev/null \
-         | sed -n "s/^${KEY}: //p" | head -1)"
+# Erst den exakten Member-Namen suchen, dann gezielt entpacken. Ein Glob im
+# Extract-Aufruf ginge nicht portabel: GNU tar braucht dafuer --wildcards,
+# BSD tar (macOS) kennt die Option nicht.
+MEMBER="$(tar tzf "$ARCHIVE" | grep -m1 '/PKG-INFO$' || true)"
+[[ -n "$MEMBER" ]] || { echo "FEHLER: kein PKG-INFO in $ARCHIVE" >&2; exit 1; }
+
+VALUE="$(tar xzOf "$ARCHIVE" "$MEMBER" | sed -n "s/^${KEY}: //p" | head -1)"
 
 [[ -n "$VALUE" ]] || { echo "FEHLER: ${KEY} nicht in PKG-INFO von $ARCHIVE" >&2; exit 1; }
 echo "$VALUE"

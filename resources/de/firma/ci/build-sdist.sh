@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Baut aus einem Paketordner eine echte sdist (PyPI-tauglich) nach dist/.
 #
-#   ci/build-sdist.sh <paket>        -> gibt den Archivpfad auf stdout aus
+#   build-sdist.sh <paket>        -> gibt den Archivpfad auf stdout aus
 #
 # Unterschied zu pack.sh: `tar czf` erzeugt ein beliebiges Archiv. Ein PyPI-Repo
 # braucht eine sdist mit PKG-INFO und dem Wurzelverzeichnis <name>-<version>/.
@@ -49,7 +49,9 @@ tar tzf "$ARCHIVE" | grep -q '/PKG-INFO$' || {
 }
 
 # Metadaten fürs Log – so sieht man sofort, wenn Ordner != Paketname
-META="$(tar xzOf "$ARCHIVE" --wildcards '*/PKG-INFO' 2>/dev/null | head -40)"
+# Siehe sdist-meta.sh: exakter Member statt Glob, wegen BSD tar.
+PKGINFO_MEMBER="$(tar tzf "$ARCHIVE" | grep -m1 '/PKG-INFO$')"
+META="$(tar xzOf "$ARCHIVE" "$PKGINFO_MEMBER" | head -40)"
 DIST_NAME="$(printf '%s\n' "$META" | sed -n 's/^Name: //p' | head -1)"
 DIST_VER="$(printf '%s\n' "$META" | sed -n 's/^Version: //p' | head -1)"
 echo "Ordner '${PKG}' -> ${DIST_NAME} ${DIST_VER}" >&2

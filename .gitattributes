@@ -1,0 +1,5 @@
+# LF erzwingen: die Skripte werden per libraryResource auf den Agent
+# geschrieben. CRLF im Shebang endet dort als
+# "bad interpreter: /usr/bin/env bash^M".
+resources/**/*.sh text eol=lf
+test/**/*.sh      text eol=lf

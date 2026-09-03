@@ -2,7 +2,7 @@
 # Lädt eine sdist in ein Nexus PyPI-HOSTED-Repository (twine).
 #
 #   NEXUS_URL=https://nexus.example.com NEXUS_PYPI_HOSTED=pypi-internal \
-#   NEXUS_USER=... NEXUS_PASS=... ci/publish-pypi.sh <archiv>
+#   NEXUS_USER=... NEXUS_PASS=... publish-pypi.sh <archiv>
 #
 # Zum LESEN nimmt man das Group-Repo (z.B. group_pypi), zum SCHREIBEN nie:
 # ein Group-Repo aggregiert nur, es nimmt keine Uploads an.

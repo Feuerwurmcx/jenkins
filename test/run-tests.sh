@@ -47,6 +47,45 @@ make_sdist() {  # <unterordner> <name> <version> -> Archivpfad auf stdout
   printf '%s\n' "${d}/archive.tar.gz"
 }
 
+# Stub fuer python3: bedient genau die zwei Aufrufe, die build-sdist.sh
+# absetzt ('-c import build' und '-m build --sdist --outdir <dir>'), und legt
+# im outdir ein Archiv wie make_sdist ab. Name/Version kommen aus STUB_NAME/
+# STUB_VERSION, damit der Test den Fall "Ordner != Paketname" abdeckt.
+#
+# Grund: der Happy Path lief bisher nur, wenn python-build oder setuptools
+# installiert waren, und wurde sonst als SKIP gemeldet. So blieb der komplette
+# Codepfad NACH dem Build (Archiv einsammeln, PKG-INFO pruefen, mv, Pfad
+# ausgeben) auf Entwicklerrechnern ungetestet - und ein 'mapfile' (Bash >= 4)
+# fiel auf dem Stock-Bash 3.2 von macOS nie auf. Mit dem Stub laeuft dieser
+# Teil immer, ganz ohne Python. Der Stub selbst muss dabei natuerlich auch
+# bash-3.2-tauglich sein (tr statt ${var,,}).
+make_python_stub() {  # -> Verzeichnis fuer PATH auf stdout
+  local d="${TMP}/stub-bin"
+  mkdir -p "$d"
+  cat > "${d}/python3" <<'STUB'
+#!/usr/bin/env bash
+# python3-Stub aus test/run-tests.sh (make_python_stub) - kein echtes Python.
+set -euo pipefail
+case "${1:-}" in
+  -c) exit 0 ;;   # 'import build' -> tut so, als waere python-build installiert
+  -m) [[ "${2:-}" == build && "${3:-}" == --sdist && "${4:-}" == --outdir && -n "${5:-}" ]] \
+        || { echo "python3-stub: unerwartete Argumente: $*" >&2; exit 2; }
+      out="$5" ;;
+  *)  echo "python3-stub: unerwarteter Aufruf: $*" >&2; exit 2 ;;
+esac
+name="${STUB_NAME:?}"; ver="${STUB_VERSION:?}"
+# Archivname wie bei einer echten sdist normalisiert (PEP 625): klein, '.'/'-' -> '_'.
+base="$(printf '%s' "$name" | tr 'A-Z' 'a-z' | tr '.-' '__')-${ver}"
+work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+mkdir "${work}/${base}"
+printf 'Metadata-Version: 2.1\nName: %s\nVersion: %s\n' "$name" "$ver" > "${work}/${base}/PKG-INFO"
+tar czf "${out}/${base}.tar.gz" -C "$work" "$base"
+echo "Successfully built ${base}.tar.gz"
+STUB
+  chmod +x "${d}/python3"
+  printf '%s\n' "$d"
+}
+
 # Legt das Fixture als echtes Git-Repo an: changed-packages.sh fragt git diff.
 fixture_repo() {  # -> Pfad auf stdout
   local d="${TMP}/repo"
@@ -98,18 +137,40 @@ OUT="$(cd "$TMP" && bash "$SCRIPTS/build-sdist.sh" leer 2>&1)"; RC=$?
 assert_rc "ohne Metadaten -> rc 1" 1 "$RC"
 assert_contains "ohne Metadaten -> Meldung" "$OUT" "keine Paket-Metadaten"
 
+# Happy Path mit Stub-Backend: laeuft IMMER (siehe make_python_stub). Der
+# Stub-Pfad steht nur fuer diesen Aufruf vorn im PATH.
+STUB_BIN="$(make_python_stub)"
+REPO="$(fixture_repo)"
+OUT="$(cd "$REPO" && PATH="${STUB_BIN}:${PATH}" STUB_NAME='Mein.Tolles_Paket' STUB_VERSION='2.1.post1' \
+       bash "$SCRIPTS/build-sdist.sh" alpha 2>"${TMP}/stub-build.err")"; RC=$?
+assert_rc "Stub-Backend: rc 0" 0 "$RC"
+assert_eq "Stub-Backend: Archivpfad auf stdout (aus Metadaten, nicht Ordnername)" \
+  "dist/mein_tolles_paket-2.1.post1.tar.gz" "$OUT"
+if [[ -n "$OUT" && -f "${REPO}/${OUT}" ]]; then ok "Stub-Backend: Archiv liegt unter dist/"
+else nok "Stub-Backend: Archiv liegt unter dist/" "kein Archiv unter ${REPO}/${OUT}"; fi
+assert_eq "Stub-Backend: Version aus gebauter sdist" "2.1.post1" \
+  "$(bash "$SCRIPTS/sdist-meta.sh" "${REPO}/${OUT}" version 2>/dev/null)"
+assert_contains "Stub-Backend: Log meldet Ordner -> Paketname" \
+  "$(cat "${TMP}/stub-build.err")" "Ordner 'alpha' -> Mein.Tolles_Paket 2.1.post1"
+assert_eq "Stub-Backend: Staging-Verzeichnis aufgeraeumt" "" \
+  "$(ls -A "${REPO}/dist" | grep '^\.build-' || true)"
+
+# Zusaetzlich mit echtem Backend, wenn eines da ist. Der Stub prueft nur den
+# Bash-Teil; erst hier zeigt sich, ob der Aufruf von python-build/setuptools
+# selbst stimmt. Aktivieren mit: python3 -m pip install --user build
 if python3 -c 'import build' 2>/dev/null || python3 -c 'import setuptools' 2>/dev/null; then
   REPO="$(fixture_repo)"
-  ARCH="$(cd "$REPO" && bash "$SCRIPTS/build-sdist.sh" alpha 2>/dev/null)"
-  if [[ -f "${REPO}/${ARCH}" ]]; then
-    ok "sdist gebaut: $ARCH"
-    assert_eq "gebaute sdist: Version" "1.0.0" \
+  ARCH="$(cd "$REPO" && bash "$SCRIPTS/build-sdist.sh" alpha 2>/dev/null)"; RC=$?
+  assert_rc "echtes Backend: rc 0" 0 "$RC"
+  if [[ -n "$ARCH" && -f "${REPO}/${ARCH}" ]]; then
+    ok "echtes Backend: sdist gebaut: $ARCH"
+    assert_eq "echtes Backend: Version aus gebauter sdist" "1.0.0" \
       "$(bash "$SCRIPTS/sdist-meta.sh" "${REPO}/${ARCH}" version)"
   else
-    nok "sdist gebaut" "kein Archiv unter ${REPO}/${ARCH}"
+    nok "echtes Backend: sdist gebaut" "kein Archiv unter ${REPO}/${ARCH}"
   fi
 else
-  skip "build-sdist.sh Happy Path" "weder python3 -m build noch setuptools vorhanden"
+  skip "build-sdist.sh mit echtem Backend" "python-build/setuptools fehlen (Stub-Backend oben deckt den Bash-Teil ab; 'python3 -m pip install --user build' aktiviert diesen Test)"
 fi
 
 echo

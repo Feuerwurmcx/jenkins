@@ -212,15 +212,61 @@ GROOVY="${ROOT}/vars/pyMonorepo.groovy"
 if [[ -f "$GROOVY" ]]; then
   ok "vars/pyMonorepo.groovy vorhanden"
 
-  # Jedes Skript, das die Groovy-Datei nennt, muss es auch geben - und umgekehrt.
-  NAMED="$(grep -oE '[a-z-]+\.sh' "$GROOVY" | sort -u)"
+  # Die materializeScripts()-Namensliste gezielt extrahieren, nicht per
+  # Mengenvergleich ueber die ganze Datei: sonst bleiben vier reale
+  # Bruchstellen unentdeckt gruen (siehe die vier Gegenproben unten). Das
+  # Regex deckt mehr als [a-z-] ab, damit ein spaeteres 'build2.sh' nicht
+  # faelschlich als fremder Name durchfaellt.
+  NAMES_LINE="$(grep -oE "List names = \[[^]]*\]" "$GROOVY")"
+  NAMED="$(grep -oE "'[A-Za-z][A-Za-z0-9_.-]*\.sh'" <<<"$NAMES_LINE" | tr -d "'" | sort -u)"
   HAVE="$(cd "$SCRIPTS" && ls *.sh | sort -u)"
-  assert_eq "genannte Skripte == vorhandene Skripte" "$HAVE" "$NAMED"
+  assert_eq "materializeScripts()-Liste == vorhandene Skripte" "$HAVE" "$NAMED"
 
-  # Klammerbilanz - faengt den haeufigsten Copy-Paste-Fehler ab.
-  OPEN="$(tr -cd '{' < "$GROOVY" | wc -c | tr -d ' ')"
-  CLOSE="$(tr -cd '}' < "$GROOVY" | wc -c | tr -d ' ')"
-  assert_eq "geschweifte Klammern ausgeglichen" "$OPEN" "$CLOSE"
+  # libraryResource() muss exakt auf den Ressourcen-Pfad zeigen, unter dem
+  # Task 1-3 die Skripte abgelegt haben.
+  assert_contains "libraryResource-Pfad ist de/firma/ci" "$(cat "$GROOVY")" \
+    'libraryResource("de/firma/ci/${n}")'
+
+  # Das Zielverzeichnis kommt seit der CPS-Default-Param-Korrektur explizit
+  # vom Aufrufer (materializeScripts('.ci-lib')). Der fuehrende Punkt ist
+  # tragend, siehe Kommentar in vars/pyMonorepo.groovy.
+  CALLARG="$(grep -oE "materializeScripts\('[^']*'\)" "$GROOVY" | head -1 | sed -E "s/.*\('([^']*)'\).*/\1/")"
+  assert_eq "materializeScripts()-Aufruf hat ein Zielverzeichnis mit fuehrendem Punkt" \
+    "." "${CALLARG:0:1}"
+
+  # Die Namensliste allein beweist nur, dass die richtigen Skripte
+  # *irgendwo* auftauchen - nicht, dass jeder sh-Aufruf das richtige Skript
+  # in seiner Rolle trifft. Deshalb zusaetzlich die tatsaechlichen
+  # Aufrufstellen (bash "$CI_LIB_DIR/<name>.sh" ...) zaehlen und gegen die
+  # erwartete Rollenverteilung pruefen.
+  CALLS="$(grep -oE '\$CI_LIB_DIR/[A-Za-z][A-Za-z0-9_.-]*\.sh' "$GROOVY" | sed -E 's#.*/##' | sort)"
+  CALL_COUNTS="$(printf '%s\n' "$CALLS" | uniq -c | awk '{printf "%s: %s\n", $2, $1}' | sort)"
+  EXPECTED_COUNTS=$'build-sdist.sh: 1\nchanged-packages.sh: 1\npublish-pypi.sh: 1\nsdist-meta.sh: 2'
+  assert_eq "sh-Aufrufstellen rufen die erwarteten Skripte in der erwarteten Anzahl auf" \
+    "$EXPECTED_COUNTS" "$CALL_COUNTS"
+
+  # Verschachtelungstiefe an zwei Ankerpunkten statt einer reinen
+  # Klammerzahl: eine verschobene schliessende Klammer aendert die
+  # Gesamtzahl nicht, wohl aber die Tiefe, auf der die zweite Stage relativ
+  # zur ersten liegt. Kommentare werden vorher entfernt (// bis Zeilenende),
+  # sonst macht ein erweitertes Beispiel im Kopfkommentar den Test rot, ohne
+  # dass Code sich geaendert hat.
+  DEPTHS="$(awk '
+    { line = $0; sub(/\/\/.*/, "", line)
+      if (line ~ /stage\(.Setup.\)/)         print "SETUP", depth
+      if (line ~ /stage\(.Pack & Publish.\)/) print "PACK", depth
+      o = gsub(/\{/, "{", line)
+      c = gsub(/\}/, "}", line)
+      depth += o - c
+    }
+    END { print "TOTAL", depth }
+  ' "$GROOVY")"
+  SETUP_DEPTH="$(awk '$1=="SETUP"{print $2}' <<<"$DEPTHS")"
+  PACK_DEPTH="$(awk '$1=="PACK"{print $2}' <<<"$DEPTHS")"
+  TOTAL_DEPTH="$(awk '$1=="TOTAL"{print $2}' <<<"$DEPTHS")"
+  assert_eq "geschweifte Klammern insgesamt ausgeglichen (Kommentare ausgenommen)" "0" "$TOTAL_DEPTH"
+  assert_eq "stage('Setup') und stage('Pack & Publish') auf gleicher Verschachtelungstiefe" \
+    "$SETUP_DEPTH" "$PACK_DEPTH"
 
   if command -v groovyc >/dev/null 2>&1; then
     if groovyc -d "$TMP/groovyc" "$GROOVY" 2>"$TMP/groovyc.err"; then

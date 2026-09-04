@@ -264,3 +264,12 @@ ab. Wer aus der alten RAW-Generation migriert, sollte den Vergleichsbuild aus
 "Migration eines Monorepos" Schritt 4 deshalb auch auf diese Verhaltensaenderung
 hin pruefen: ein reiner `__init__.py`-Ordner, der frueher (RAW) mitgebaut
 wurde, wird jetzt uebersprungen.
+
+## Nachtrag 2026-09-03: Upload ohne twine
+
+Auf dem Ziel-Agent ist `twine` nicht verfuegbar und Nachinstallieren ist
+ausgeschlossen. `publish-pypi.sh` laedt deshalb per `curl` gegen
+`/service/rest/v1/components?repository=<repo>` hoch statt per
+`python3 -m twine upload`. Aufrufsignatur, Exit-Codes (2 = Version existiert,
+3 = falscher Repo-Typ) und der Repo-Typ-Check bleiben unveraendert. Details:
+`2026-09-03-publish-ohne-twine-design.md`.

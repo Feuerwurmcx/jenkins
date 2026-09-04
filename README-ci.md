@@ -10,7 +10,7 @@ sie in ein Nexus-PyPI-**hosted**-Repo.
         changed-packages.sh                welche Top-Level-Ordner haben sich geaendert
         build-sdist.sh                     ein Ordner -> dist/<name>-<version>.tar.gz (echte sdist)
         sdist-meta.sh                      Name/Version aus der PKG-INFO der sdist
-        publish-pypi.sh                    twine-Upload ins PyPI-hosted-Repo
+        publish-pypi.sh                    curl-Upload ins PyPI-hosted-Repo (Nexus-REST-API)
     examples/Jenkinsfile                   Vorlage fuer die Wurzel eines Monorepos
     examples/Jenkinsfile.embedded          bestehende Pipeline + eine Stage mit pyMonorepo.build()
     examples/Jenkinsfile.steps             bestehende Pipeline mit Einzel-Steps
@@ -29,15 +29,12 @@ laeuft:
 * `bash` (die Skripte selbst; `/bin/bash` reicht, auch die alte 3.2 von macOS)
 * `git` (`changed-packages.sh`)
 * `tar` (`build-sdist.sh`, `sdist-meta.sh`)
-* `curl` (`publish-pypi.sh`, Repo-Typ-Check gegen die Nexus-REST-API)
+* `curl` (`publish-pypi.sh`, Repo-Typ-Check und Upload gegen die Nexus-REST-API)
 * `python3` mit `build` (`python3 -m pip install --user build`) oder ersatzweise
   `setuptools` (`build-sdist.sh` faellt sonst auf `setup.py sdist` zurueck)
-* das Python-Modul `twine` (`python3 -m pip install --user twine`,
-  `publish-pypi.sh`)
 
-Fehlt `twine`, scheitert nicht die Einrichtung, sondern erst der erste
-Upload-Schritt mit `No module named twine` - am besten vorher pruefen statt
-das im ersten produktiven Build zu entdecken.
+Ausdruecklich **nicht** noetig ist `twine`: der Upload laeuft per `curl` gegen
+die Nexus-REST-Components-API.
 
 ## Einmalige Einrichtung
 
@@ -211,9 +208,20 @@ aus, `sdist-meta.sh` liest Name und Version aus der `PKG-INFO`.
 ## Doppelte Versionen
 
 Weil die Version aus dem Paket kommt, ist "zweimal dieselbe Version hochladen"
-fast immer ein vergessener Version-Bump. Ein PyPI-hosted-Repo lehnt das mit 400
-ab; `publish-pypi.sh` erkennt das und bricht mit Exit-Code 2 und klarer Meldung
-ab, statt einen Infrastrukturfehler zu melden.
+fast immer ein vergessener Version-Bump. Ein PyPI-hosted-Repo lehnt eine bereits
+vorhandene Version mit HTTP 400 ab; `publish-pypi.sh` wertet den Statuscode
+getrennt vom Antwort-Body aus und bricht dann mit Exit-Code 2 und klarer
+Meldung ab. Andere 400er werden mit Status und Body ausgegeben und enden mit
+Exit-Code 1.
+
+`publish-pypi.sh` postet dabei per `curl` gegen
+`{NEXUS_URL}/service/rest/v1/components?repository={NEXUS_PYPI_HOSTED}` - die
+Nexus-Components-API. Das ist nicht dieselbe URL, unter der Nexus die Datei
+hinterher zeigt (`.../repository/<repo>/packages/<name>/<version>/<datei>`):
+diesen Ablagepfad vergibt Nexus selbst aus Name und Version, die es aus der
+`PKG-INFO` der sdist liest - wir schicken nur die Datei, keinen Zielpfad. Mit
+twine war das nicht anders: twine postete ebenfalls gegen die Repo-Wurzel,
+nicht gegen `/packages/`.
 
 `publish-pypi.sh` prueft ausserdem vorab ueber die Nexus-REST-API, ob
 `NEXUS_PYPI_HOSTED` wirklich ein hosted-PyPI-Repo ist (Exit 3 bei group, bei
@@ -307,10 +315,19 @@ Monorepo und damit von jedem Branch aus kontrollierbar. Stuende er per
 `withEnv` und ein gequotetes `"$PKG"` bleibt er ein einzelnes Argument, egal
 welche Anfuehrungszeichen oder Sonderzeichen er enthaelt.
 
-**3. argv.** `publish-pypi.sh` reicht die Zugangsdaten ueber
-`TWINE_USERNAME`/`TWINE_PASSWORD` weiter, nicht als Kommandozeilenargument -
-sonst stuenden sie in der Prozessliste. Der Repo-Typ-Check nutzt aus demselben
-Grund `curl --config -`.
+**3. argv.** Beide `curl`-Aufrufe in `publish-pypi.sh` – der Repo-Typ-Check und
+der Upload – lesen die Zugangsdaten ueber `curl --config -` von stdin, nicht als
+Kommandozeilenargument: sonst stuenden sie in der Prozessliste jedes Nutzers auf
+dem Agent. `"` und `\` werden dabei escaped, weil sie im curl-Config-Format
+Steuerzeichen sind. Der Testtreiber prueft beides.
+
+Ein Zeilenumbruch in `NEXUS_USER`/`NEXUS_PASS` laesst sich im curl-Config-Format
+nicht darstellen (ein Wert pro Zeile) - `publish-pypi.sh` lehnt das deshalb
+vorab mit Exit-Code 1 und eigener Meldung ab, statt curl mit einer kaputten
+Config abbrechen zu lassen. Ohne diese Pruefung wuerde curl beim Scheitern die
+zweite Zeile woertlich in seine Fehlermeldung zitieren, und die landet ungekuerzt
+im Build-Log - Jenkins maskiert dort nur das vollstaendige Secret, nicht ein
+Fragment davon.
 
 Wollt ihr Secrets ganz aus der Job-Konfiguration heraushalten, ist der naechste
 Schritt ein Nexus-Token pro Team statt eines Deploy-Users, hinterlegt als

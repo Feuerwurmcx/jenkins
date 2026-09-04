@@ -7,7 +7,7 @@
 //        @Library('ci-shared@v1.0.0') _
 //        pyMonorepo { nexusUrl = 'https://nexus.example.com'; hostedRepo = 'pypi-hosted' }
 //
-//   2) Composite-Step in einer Stage einer BESTEHENDEN Pipeline (Task 2):
+//   2) Composite-Step in einer Stage einer BESTEHENDEN Pipeline:
 //        script { pyMonorepo.build(nexusUrl: '...', hostedRepo: 'pypi-hosted') }
 //
 //   3) Einzel-Steps, wenn eine Pipeline abweichen muss:
@@ -69,61 +69,14 @@ def call(Closure body) {
         }
 
         stages {
-
-            stage('Setup') {
+            stage('Build') {
                 steps {
                     script {
-                        install()
-
-                        // Basis fuer den Diff: letzter erfolgreicher Build (Git-Plugin
-                        // setzt das), sonst HEAD~1, sonst leer -> alles bauen.
-                        String base = params.BUILD_ALL ? '' : defaultBase()
-                        List pkgs = changedPackages(base, cfg.packages)
-                        env.CHANGED = pkgs.join('\n')
-
-                        echo "Basis   : ${base ?: '(keine – alles)'}"
-                        echo "Pakete  : ${pkgs.join(', ') ?: '(keine Änderungen)'}"
-
-                        if (pkgs.isEmpty()) {
-                            currentBuild.result = 'SUCCESS'
-                            currentBuild.description = 'keine Paketänderungen'
-                        } else {
-                            currentBuild.description = "${pkgs.size()} Paket(e): ${pkgs.join(', ')}"
-                        }
-                    }
-                }
-            }
-
-            stage('Pack & Publish') {
-                when { expression { env.CHANGED?.trim() } }
-                steps {
-                    script {
-                        List pkgs = env.CHANGED.trim().split('\n') as List
-                        Map versions = [:]   // CPS-Branches laufen kooperativ, kein Sync noetig
-
-                        parallel pkgs.collectEntries { pkg ->
-                            [ (pkg): {
-                                stage(pkg) {
-                                    String archive  = buildSdist(pkg)
-                                    String version  = meta(archive, 'version')
-                                    String distName = meta(archive, 'name')
-                                    echo "${pkg}: ${distName} ${version}"
-
-                                    if (params.SKIP_UPLOAD) {
-                                        echo "SKIP_UPLOAD gesetzt – ${archive} nicht hochgeladen"
-                                    } else {
-                                        publish(archive: archive,
-                                                nexusUrl: cfg.nexusUrl,
-                                                hostedRepo: cfg.hostedRepo,
-                                                credentialsId: cfg.credentialsId)
-                                    }
-                                    versions[pkg] = "${distName} ${version}"
-                                }
-                            }]
-                        }
-
-                        currentBuild.description = versions.sort()
-                            .collect { k, v -> v }.join(', ')
+                        // Archivieren und Aufraeumen macht der post-Block unten -
+                        // der laeuft auch, wenn build() abbricht.
+                        build(nexusUrl: cfg.nexusUrl, hostedRepo: cfg.hostedRepo,
+                              credentialsId: cfg.credentialsId, packages: cfg.packages,
+                              archive: false, cleanup: false)
                     }
                 }
             }
@@ -140,6 +93,91 @@ def call(Closure body) {
                 // der Aufruf zweideutig zwischen der Closure und dem Step.
                 script { this.cleanup() }
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Composite-Step fuer bestehende Pipelines
+// ---------------------------------------------------------------------------
+
+// Der ganze Ablauf in EINER Stage des Aufrufers:
+//
+//   stage('Pakete') { steps { script {
+//       pyMonorepo.build(nexusUrl: 'https://nexus...', hostedRepo: 'pypi-hosted')
+//   } } }
+//
+// Argumente (alle ausser nexusUrl optional):
+//   hostedRepo, credentialsId, packages  - wie in der Vollpipeline
+//   buildAll, skipUpload  - Argument gewinnt; fehlt es, params.BUILD_ALL /
+//                           params.SKIP_UPLOAD, falls die Pipeline sie hat; sonst false
+//   base                  - Diff-Basis; fehlt sie, wie ueblich berechnet
+//   archive (true)        - dist/*.tar.gz am Ende archivieren
+//   cleanup (true)        - dist/ und .ci-lib/ am Ende entfernen
+// archive/cleanup auf false setzen, wenn der eigene post-Block das uebernimmt
+// (dann dort pyMonorepo.cleanup() aufrufen). Rueckgabe: Paket -> "name version".
+Map build(Map args) {
+    List allowed = ['nexusUrl', 'hostedRepo', 'credentialsId', 'packages', 'buildAll', 'skipUpload', 'base', 'archive', 'cleanup']
+    List unknown = []
+    for (String k : args.keySet()) {
+        if (!(k in allowed)) { unknown << k }
+    }
+    if (unknown) {
+        error "pyMonorepo.build: unbekannte Argumente ${unknown} - erlaubt: ${allowed}"
+    }
+    if (!args.nexusUrl) {
+        error 'pyMonorepo.build: nexusUrl fehlt - Basis-URL der Nexus-Instanz setzen'
+    }
+    boolean doArchive  = args.containsKey('archive')    ? (args.archive    as boolean) : true
+    boolean doCleanup  = args.containsKey('cleanup')    ? (args.cleanup    as boolean) : true
+    boolean buildAll   = args.containsKey('buildAll')   ? (args.buildAll   as boolean) : paramOr('BUILD_ALL', false)
+    boolean skipUpload = args.containsKey('skipUpload') ? (args.skipUpload as boolean) : paramOr('SKIP_UPLOAD', false)
+    String hostedRepo    = args.hostedRepo    ?: 'pypi-hosted'
+    String credentialsId = args.credentialsId ?: 'nexus-pypi-deploy'
+    Map versions = [:]   // CPS-Branches laufen kooperativ, kein Sync noetig
+
+    try {
+        install()
+        String base = args.containsKey('base') ? (args.base ?: '') : (buildAll ? '' : defaultBase())
+        List pkgs = changedPackages(base, args.packages ?: '')
+
+        echo "Basis   : ${base ?: '(keine – alles)'}"
+        echo "Pakete  : ${pkgs.join(', ') ?: '(keine Änderungen)'}"
+
+        if (pkgs.isEmpty()) {
+            currentBuild.description = 'keine Paketänderungen'
+            return versions
+        }
+        currentBuild.description = "${pkgs.size()} Paket(e): ${pkgs.join(', ')}"
+
+        parallel pkgs.collectEntries { pkg ->
+            [ (pkg): {
+                stage(pkg) {
+                    String archive  = buildSdist(pkg)
+                    String distName = meta(archive, 'name')
+                    String version  = meta(archive, 'version')
+                    echo "${pkg}: ${distName} ${version}"
+
+                    if (skipUpload) {
+                        echo "skipUpload – ${archive} nicht hochgeladen"
+                    } else {
+                        publish(archive: archive, nexusUrl: args.nexusUrl,
+                                hostedRepo: hostedRepo, credentialsId: credentialsId)
+                    }
+                    versions[pkg] = "${distName} ${version}"
+                }
+            }]
+        }
+
+        currentBuild.description = versions.sort().collect { k, v -> v }.join(', ')
+        return versions
+    } finally {
+        // Erst archivieren, dann aufraeumen - sonst ist dist/ schon weg.
+        if (doArchive) {
+            archiveArtifacts artifacts: 'dist/*.tar.gz', allowEmptyArchive: true, fingerprint: true
+        }
+        if (doCleanup) {
+            cleanup()
         }
     }
 }
@@ -264,6 +302,15 @@ private void requireInstalled() {
     if (!env.CI_LIB_DIR) {
         error 'pyMonorepo: install() wurde nicht aufgerufen - env.CI_LIB_DIR fehlt'
     }
+}
+
+// params existiert nur, wenn die Pipeline Parameter definiert (und in manchen
+// Kontexten gar nicht). Ohne die Absicherung wuerde ein eingebetteter Aufruf in
+// einer Pipeline ohne parameters{} mit MissingPropertyException sterben.
+private boolean paramOr(String name, boolean dflt) {
+    if (!binding.hasVariable('params')) { return dflt }
+    def p = params
+    return p.containsKey(name) ? (p[name] as boolean) : dflt
 }
 
 // Basis fuer den Diff: letzter erfolgreicher Build (Git-Plugin setzt das),

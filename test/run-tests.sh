@@ -574,40 +574,71 @@ $BAD_BARE"; fi
 
   # 10) call() (C-1): der Rumpf der Vollpipeline war von keinem der obigen
   #     Tests geschuetzt - "Methode existiert" (Test 5) prueft nur die
-  #     Signaturzeile. Struktur, Parameter, Log-Zeilen und der post-Block
-  #     einzeln pinnen.
+  #     Signaturzeile. call() delegiert den kompletten Ablauf jetzt an EINE
+  #     Stage, die build() ruft - Struktur, Parameter und der post-Block
+  #     werden hier gepinnt; der eigentliche Ablauf (Basis/Pakete, parallel,
+  #     publish, finally) steckt jetzt in build() und wird dort (10b) gepinnt.
   CALL_BODY="$(step_body 'def call(Closure body)')"
-  for NEEDLE in "stage('Setup')" \
-                "stage('Pack & Publish')" \
-                "when { expression { env.CHANGED?.trim() } }" \
-                "archiveArtifacts artifacts: 'dist/*.tar.gz'" \
-                "booleanParam(name: 'BUILD_ALL'" \
+  for NEEDLE in "booleanParam(name: 'BUILD_ALL'" \
                 "booleanParam(name: 'SKIP_UPLOAD'" \
-                "if (params.SKIP_UPLOAD) {" \
-                'echo "Basis   :' \
-                'echo "Pakete  :' \
-                "env.CHANGED = pkgs.join('\n')" \
+                "stage('Build')" \
+                "archiveArtifacts artifacts: 'dist/*.tar.gz'" \
                 "post {" \
-                "cleanup {"; do
+                "cleanup {" \
+                "this.cleanup()" \
+                "build(" \
+                "archive: false" \
+                "cleanup: false"; do
     assert_contains "call(): enthaelt [$NEEDLE]" "$CALL_BODY" "$NEEDLE"
   done
+  if ! grep -qF "stage('Pack & Publish')" <<<"$CALL_BODY"; then
+    ok "call() hat keine eigene Pack-&-Publish-Stage mehr"
+  else nok "call() hat keine eigene Pack-&-Publish-Stage mehr" "stage('Pack & Publish') noch vorhanden"; fi
 
-  # Verschachtelungstiefe an zwei Ankerpunkten statt einer reinen Klammerzahl:
-  # eine verschobene schliessende Klammer aendert die Gesamtzahl nicht, wohl
-  # aber die Tiefe, auf der die zweite Stage relativ zur ersten liegt.
-  DEPTHS="$(awk '
-    { line = $0
-      if (line ~ /stage\(.Setup.\)/)         print "SETUP", depth
-      if (line ~ /stage\(.Pack & Publish.\)/) print "PACK", depth
-      o = gsub(/\{/, "{", line)
-      c = gsub(/\}/, "}", line)
-      depth += o - c
-    }
-  ' <<<"$CALL_BODY")"
-  SETUP_DEPTH="$(awk '$1=="SETUP"{print $2}' <<<"$DEPTHS")"
-  PACK_DEPTH="$(awk '$1=="PACK"{print $2}' <<<"$DEPTHS")"
-  assert_eq "stage('Setup') und stage('Pack & Publish') auf gleicher Verschachtelungstiefe" \
-    "$SETUP_DEPTH" "$PACK_DEPTH"
+  # call() enthaelt jetzt genau eine stage() auf Stages-Ebene (frueher zwei:
+  # Setup + Pack & Publish, per Tiefenvergleich gepinnt - der Vergleich ergibt
+  # mit nur noch einer Stage keinen Sinn mehr). build() baut seine eigene
+  # stage(pkg) je Paket (10b).
+  CALL_STAGE_COUNT="$(grep -oE 'stage\(' <<<"$CALL_BODY" | wc -l | tr -d ' ')"
+  assert_eq "call() enthaelt genau eine stage()" "1" "$CALL_STAGE_COUNT"
+
+  # 10b) build(Map) (Task 2): der Composite-Step fuer bestehende Pipelines -
+  #      kein pipeline{}-Block, Schluessel-Whitelist gegen unbekannte
+  #      Argumente, und der Ablauf, der frueher in call()/"Pack & Publish"
+  #      stand (jetzt hier: Basis/Pakete ermitteln, parallel je Paket bauen/
+  #      lesen/publishen, im finally archivieren und aufraeumen).
+  if grep -qF 'Map build(Map args)' <<<"$CODE"; then ok "Methode vorhanden: Map build(Map args)"
+  else nok "Methode vorhanden: Map build(Map args)" "nicht gefunden"; fi
+  BUILD_MAP_BODY="$(step_body 'Map build(Map args)')"
+  if [[ -n "$BUILD_MAP_BODY" ]] && ! grep -qE 'pipeline[[:space:]]*\{' <<<"$BUILD_MAP_BODY"; then
+    ok "build() enthaelt keinen pipeline{}-Block"
+  else nok "build() enthaelt keinen pipeline{}-Block" "Rumpf leer oder pipeline{} gefunden"; fi
+  assert_contains "build() kennt die erlaubten Schluessel" "$BUILD_MAP_BODY" \
+    "['nexusUrl', 'hostedRepo', 'credentialsId', 'packages', 'buildAll', 'skipUpload', 'base', 'archive', 'cleanup']"
+  assert_contains "build() lehnt unbekannte Schluessel ab" "$BUILD_MAP_BODY" 'unbekannte Argumente'
+  for NEEDLE in "stage(pkg)" \
+                "if (skipUpload) {" \
+                'echo "Basis   :' \
+                'echo "Pakete  :' \
+                "parallel pkgs.collectEntries" \
+                "versions.sort()" \
+                "currentBuild.description" \
+                "install()" \
+                "changedPackages(base, args.packages" \
+                "buildSdist(pkg)" \
+                "meta(archive, 'version')" \
+                "meta(archive, 'name')" \
+                "publish(archive: archive" \
+                "finally" \
+                "archiveArtifacts" \
+                "cleanup()"; do
+    assert_contains "build(): enthaelt [$NEEDLE]" "$BUILD_MAP_BODY" "$NEEDLE"
+  done
+
+  # 10c) params-Zugriff abgesichert (paramOr()): ohne binding.hasVariable
+  #      wuerde ein eingebetteter build()-Aufruf in einer Pipeline ohne
+  #      parameters{} mit MissingPropertyException sterben.
+  assert_contains "paramOr() sichert params per binding.hasVariable ab" "$CODE" "binding.hasVariable('params')"
 
   # 11) Step-Vertrag (I-1): requireInstalled() und die Delegation von
   #     changedPackages(base) an changedPackages(base, packages) duerfen

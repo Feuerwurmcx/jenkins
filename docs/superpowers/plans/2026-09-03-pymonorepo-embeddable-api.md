@@ -939,3 +939,63 @@ Erster Jenkins-Lauf, zusaetzlich zur Liste im vorigen Plan: (0) laedt das Var mi
 fremden Stage, inklusive `stage(pkg)` innerhalb von `parallel` in einem
 `script {}`-Block; (8) `binding.hasVariable('params')` in einer Pipeline ohne
 `parameters {}`.
+
+---
+
+## Nachtrag 2026-09-03: Ergebnis der Ausfuehrung
+
+Alle drei Tasks umgesetzt, je Task Review und Fix-Runden; Abschluss-Review ueber
+den gesamten Bereich (0 Critical, 7 Important, 11 Minor, "With fixes"),
+eine Fix-Welle und ein scoped Re-Review, beide sauber. Testtreiber am Ende:
+PASS 169 FAIL 0 SKIP 3.
+
+Ueber den Plan hinaus entschieden und umgesetzt:
+
+* `paramOr()` liest `params` NUR noch per Property-Zugriff. Der urspruenglich
+  geplante `binding.hasVariable('params')`-Zweig war wirkungslos (`params` ist
+  eine GlobalVariable ohne Binding-Eintrag) und zwang der Library eine
+  trusted-Installation auf, weil `getBinding()` im Sandbox verboten ist. Die
+  Library laeuft jetzt auch folder-scoped. `call()` reicht `buildAll`/
+  `skipUpload` zusaetzlich explizit durch.
+* `toBool()` parst Strings statt Groovy-Truthiness: `'false' as boolean` waere
+  `true` gewesen, ein `string`-Parameter `'false'` haette also das Gegenteil
+  bewirkt.
+* `this.build()` / `this.cleanup()` in `call()` wegen Namenskollision mit den
+  globalen Steps `build` und dem Declarative-`cleanup`-Block.
+* Im `finally` von `build()` wird `InterruptedException` weitergeworfen (Abort
+  darf nicht verschluckt werden), andere Fehler beim Aufraeumen nur geloggt.
+* `cleanup()` loescht nur `dist/*.tar.gz` und entfernt `dist/` nur, wenn es
+  dadurch leer wird — eingebettet gehoert der Workspace dem Aufrufer, und
+  `dist/` ist ein verbreiteter Ausgabeordner.
+* Der Kommentar-Stripper im Testtreiber ist quoting-bewusst (awk statt sed).
+  Vorher schnitt er `//` auch in String-Literalen; eine echte
+  `${base}`-Injection lief dadurch mit FAIL 0 durch, sobald im `sh`-String eine
+  URL stand.
+
+### Bewusst zurueckgestellt — nach dem Merge
+
+* `cfg.packages` wird an einen `String`-Parameter gebunden; eine `List` in der
+  Config-Closure wuerfe `MissingMethodException`.
+* `build()` ueberschreibt `currentBuild.description` ohne Opt-out (dokumentiert).
+* Ein Top-Level-Paketordner namens `failFast` wuerde von `parallel` als Option
+  statt als Branch gelesen.
+* Der examples-Test wuerde `pyMonorepo.groovy` in einem Beispiel-Kommentar als
+  Methode `groovy` lesen (latenter False-Positive).
+
+### Erster echter Jenkins-Lauf — Pruefreihenfolge
+
+Zusaetzlich zur Liste im vorigen Plan, getrennt nach Einstiegspunkt:
+
+1. Laedt das Var mit `call()` UND benannten Methoden?
+2. Vollpipeline: baut sie auf? `cfg.keepBuilds` im `options`-Block bleibt der
+   erste Fehlerkandidat.
+3. Vollpipeline mit `BUILD_ALL` und `SKIP_UPLOAD`: wirken beide Haken wirklich?
+   (Das war die Regression, die `paramOr()` verursacht haette.)
+4. Eingebettet: `pyMonorepo.build(...)` in einer fremden Stage — laeuft
+   `parallel` mit `stage(pkg)` dort, und werden `dist/` und `.ci-lib/` wie
+   dokumentiert behandelt?
+5. Eingebettet ohne `parameters {}` in der fremden Pipeline: greift der
+   `paramOr()`-Fallback ohne Exception?
+6. Einzel-Steps: `install()` -> `changedPackages()` -> `buildSdist()` ->
+   `meta()` -> `publish()` -> `cleanup()`, und ein Step nach `cleanup()` muss
+   mit "install() wurde nicht aufgerufen" abbrechen.

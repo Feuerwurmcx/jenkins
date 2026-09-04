@@ -46,10 +46,12 @@ das im ersten produktiven Build zu entdecken.
    (`pip install -i .../repository/<group>/simple/`).
 2. Jenkins: Credential vom Typ *Username with password* mit der ID
    `nexus-pypi-deploy`.
-3. Jenkins: Manage Jenkins -> System -> Global Pipeline Libraries, dieses Repo
-   unter dem Namen `ci-shared` eintragen — nicht als folder-scoped bzw.
-   sandboxed Library: `build()` liest `params` ueber `binding`, und das
-   erfordert eine **trusted** Library.
+3. Jenkins: dieses Repo unter dem Namen `ci-shared` als Pipeline Library
+   eintragen. Als Global Pipeline Library (Manage Jenkins -> System ->
+   Global Pipeline Libraries) empfohlen, wenn mehrere Teams sie nutzen sollen -
+   zwingend ist das nicht mehr: die Library kommt ohne `binding`-Zugriff aus
+   und laeuft auch als folder-scoped, sandboxed Library (`Folder Configuration
+   -> Pipeline Libraries`).
 4. Im Monorepo `examples/Jenkinsfile` als `Jenkinsfile` in die Wurzel legen,
    `nexusUrl` sowie `hostedRepo` anpassen und `.ci-lib/` in die `.gitignore`
    aufnehmen - dorthin schreibt die Library die Skripte bei jedem Build,
@@ -81,6 +83,32 @@ Die Vollpipeline `pyMonorepo { ... }` ersetzt den ganzen Jenkinsfile. Wer schon
 eine Pipeline mit eigenen Stages hat, bindet die Library stattdessen in einer
 Stage ein — ein Declarative `pipeline {}` laesst sich nicht in ein anderes
 einbetten, ein Step schon.
+
+### Voraussetzungen an die Stage
+
+`build()` (und die Einzel-Steps) laufen im Workspace der aufrufenden Stage,
+nicht in einem eigenen. Das bringt drei Voraussetzungen mit, die eine
+Vollpipeline (`agent any` mit implizitem Checkout) automatisch erfuellte,
+eine eingebettete Pipeline aber nicht zwingend:
+
+* Die Stage braucht einen Agent mit Workspace - `agent none` auf oberster
+  Ebene mit einem `agent`-losen `script {}` funktioniert nicht.
+* Der Workspace braucht einen Git-Checkout des Monorepos, sonst scheitert
+  `changedPackages()`/`build()` an `git diff`. Bei `options {
+  skipDefaultCheckout() }` vorher explizit `checkout scm` aufrufen.
+* Ein `shallow clone` (wenig oder keine History) ist kein harter Fehler, fuehrt
+  aber dazu, dass `changed-packages.sh` den Basis-Commit nicht findet und auf
+  "alles bauen" zurueckfaellt - bei jedem Build.
+
+**`dist/`-Konflikt:** `build()` baut nach `dist/` (wie `python -m build`) und
+`cleanup()` entfernt danach die eigenen `dist/*.tar.gz` (siehe "Artefakte und
+Aufraeumen"). Baut die eigene Pipeline selbst etwas nach `dist/` (webpack,
+rollup, vite, `python -m build` fuer ein anderes Paket, Gradle
+`distribution`), reicht das inzwischen aus, um Kollisionen zu vermeiden -
+`cleanup()` loescht das Verzeichnis nicht mehr komplett. Wer trotzdem auf
+Nummer sicher gehen will (z. B. bei einem eigenen, exotischen Aufraeum-Schritt
+gegen `dist/`), setzt `cleanup: false` und ruft `pyMonorepo.cleanup()` selbst
+an der gewuenschten Stelle auf.
 
 ### Composite-Step (Normalfall)
 
@@ -150,12 +178,15 @@ Branches, eigene Stage je Paket):
 | `pyMonorepo.buildSdist(pkg)` | Archivpfad | sdist bauen |
 | `pyMonorepo.meta(archive, 'name'\|'version')` | String | aus der PKG-INFO |
 | `pyMonorepo.publish(archive:, nexusUrl:, hostedRepo:, credentialsId:)` | -- | Upload |
-| `pyMonorepo.cleanup()` | -- | `dist/` und `.ci-lib/` entfernen |
+| `pyMonorepo.cleanup()` | -- | eigene sdists aus `dist/` und `.ci-lib/` entfernen |
 
 `changedPackages()`, `buildSdist()`, `meta()` und `publish()` brechen mit
 klarer Meldung ab, wenn `install()` nicht vorher aufgerufen wurde.
 `cleanup()` ist die Ausnahme: es ist idempotent und raeumt auch auf, wenn
-`install()` nie lief. Alle Steps funktionieren in Declarative (`script {}`)
+`install()` nie lief. `cleanup()` setzt dabei auch `env.CI_LIB_DIR` zurueck -
+ein Einzel-Step **nach** `cleanup()` in derselben Pipeline verlangt deshalb
+wieder ein vorheriges `install()`, sonst bricht er mit derselben Meldung ab
+wie ohne jedes `install()`. Alle Steps funktionieren in Declarative (`script {}`)
 und Scripted Pipelines. Vollstaendiges Beispiel: `examples/Jenkinsfile.steps`.
 Das Beispiel nutzt `env.BRANCH_NAME` (Upload nur auf main) und
 `env.GIT_PREVIOUS_SUCCESSFUL_COMMIT` (Diff-Basis); beide sind nur in
@@ -217,12 +248,15 @@ Nach jedem Build - egal ob erfolgreich oder nicht - archiviert `pyMonorepo` im
 fingerprint: true`); `allowEmptyArchive: true` sorgt dafuer, dass ein Build
 ohne Paketaenderungen (kein `dist/`) deswegen nicht als Fehler gilt. Die
 sdists liegen danach im Artefakt-Tab des Builds, nicht mehr im Workspace: der
-`cleanup`-Block loescht anschliessend `dist/` und das Verzeichnis, in das die
-Skripte zur Laufzeit geschrieben wurden (`.ci-lib/`, siehe `CI_LIB_DIR`). Mehr
-raeumt der `cleanup`-Block nicht weg - es gibt weder `cleanWs()` noch
-`deleteDir()`. Der uebrige Workspace bleibt zwischen Builds liegen: der
-Checkout, die Paketordner und Build-Nebenprodukte wie `*.egg-info` sind auch
-nach dem Build noch da.
+`cleanup`-Block entfernt anschliessend die selbst erzeugten `dist/*.tar.gz`
+(und `dist/` selbst, aber nur, wenn dadurch nichts mehr darin liegt - eine
+fremde Pipeline, die selbst nach `dist/` baut, behaelt ihr Artefakt, siehe
+"Voraussetzungen an die Stage") sowie das Verzeichnis, in das die Skripte zur
+Laufzeit geschrieben wurden (`.ci-lib/`, siehe `CI_LIB_DIR`). Mehr raeumt der
+`cleanup`-Block nicht weg - es gibt weder `cleanWs()` noch `deleteDir()`. Der
+uebrige Workspace bleibt zwischen Builds liegen: der Checkout, die
+Paketordner und Build-Nebenprodukte wie `*.egg-info` sind auch nach dem Build
+noch da.
 
 Eingebettet per `build()` passiert dasselbe im `finally` des Steps (Argumente
 `archive`/`cleanup`).
@@ -284,12 +318,32 @@ Jenkins-Credential mit Folder-Scope statt global.
 
 ## Migration eines bestehenden Monorepos
 
+Zwei Faelle, je nachdem, ob das Monorepo schon eine eigene Pipeline hat.
+
+### Monorepo ohne eigene Pipeline
+
 1. Library in Jenkins als `ci-shared` registrieren (siehe Einrichtung).
 2. `Jenkinsfile` durch die Vorlage aus `examples/` ersetzen.
 3. `ci/` im Monorepo loeschen, `.ci-lib/` in die `.gitignore` aufnehmen -
    dorthin schreibt die Library die Skripte zur Laufzeit.
 4. Einmal mit `SKIP_UPLOAD` bauen und die Paketliste im Log gegen den alten
    Build vergleichen.
+
+### Monorepo mit bestehender Pipeline
+
+Der Normalfall, fuer den dieser Umbau gemacht wurde - die eigene Pipeline
+bleibt bestehen, nichts wird ersetzt:
+
+1. Library in Jenkins als `ci-shared` registrieren (siehe Einrichtung).
+2. Im bestehenden `Jenkinsfile` oben `@Library('ci-shared@v1.0.0') _`
+   ergaenzen.
+3. Eine Stage mit `script { pyMonorepo.build(nexusUrl: ..., hostedRepo: ...) }`
+   einfuegen (siehe "Integration in eine bestehende Pipeline" oben).
+4. `.ci-lib/` in die `.gitignore` aufnehmen - dorthin schreibt die Library die
+   Skripte zur Laufzeit; ein eigener `ci/`-Ordner bleibt unangetastet und muss
+   nicht geloescht werden.
+5. Einmal mit `skipUpload: true` bauen und die Paketliste im Log gegen den
+   bisherigen Weg gegenpruefen, bevor der Upload scharf geschaltet wird.
 
 Eine fruehere Fassung der Vollpipeline setzte intern `env.CHANGED` mit der
 Paketliste; dafuer gab es keinen externen Konsumenten, deshalb setzt

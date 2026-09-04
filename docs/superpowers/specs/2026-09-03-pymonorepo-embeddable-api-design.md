@@ -63,7 +63,7 @@ Gemeinsame Regeln:
 | `buildSdist(pkg)` | `String buildSdist(String pkg)` | Ruft `build-sdist.sh "$PKG"`, gibt den Archivpfad (`dist/<datei>`) zurueck. |
 | `meta(archive, field)` | `String meta(String archive, String field)` | Ruft `sdist-meta.sh "$ARCHIVE" <field>`; `field` ist `name` oder `version` (Whitelist als zweite Sicherung; geht per withEnv rein). |
 | `publish(args)` | `void publish(Map args)` | Pflicht: `archive`, `nexusUrl`. Optional: `hostedRepo` (`pypi-hosted`), `credentialsId` (`nexus-pypi-deploy`). `withCredentials` nur um den einen `sh`-Schritt. |
-| `cleanup()` | `void cleanup()` | `rm -rf dist` und `rm -rf "$CI_LIB_DIR"` (nur wenn gesetzt). Idempotent. |
+| `cleanup()` | `void cleanup()` | Entfernt die eigenen `dist/*.tar.gz` (und `dist/` selbst nur, wenn dadurch leer - siehe I-1 im Abschluss-Review) und `rm -rf "$CI_LIB_DIR"` (nur wenn gesetzt); setzt danach `env.CI_LIB_DIR` zurueck, ein Step danach verlangt wieder `install()`. Idempotent. |
 
 `meta()` validiert `field` gegen `['name', 'version']` und bricht sonst mit
 `error` ab. Der Wert geht trotzdem per `withEnv` (`FIELD`) in den Aufruf —
@@ -99,16 +99,21 @@ Laeuft innerhalb einer Stage des Aufrufers. Ablauf:
 
 Parameterfluss fuer `buildAll`/`skipUpload`: Argument, wenn im Map vorhanden
 (auch `false` zaehlt als vorhanden); sonst `params.<NAME>`, wenn die Pipeline
-den Parameter definiert; sonst `false`. Der Zugriff auf `params` ist zweistufig
-abgesichert: zuerst `binding.hasVariable('params')`, dann - falls das `false`
-liefert - ein `try`/`catch` um den Property-Zugriff `params`. Grund: in
-Jenkins-CPS (workflow-cps) ist `params` keine Eintragung im Binding, sondern
-eine `GlobalVariable`, die erst ueber den `MissingPropertyException`-Fallback
-von `CpsScript.getProperty()` aufgeloest wird - `binding.hasVariable('params')`
-liefert dafuer immer `false` und waere allein wirkungslos (haette `paramOr()`
-immer auf den Default zurueckfallen lassen, auch wenn `params` existierte).
-Die zweite Stufe deckt genau diesen Fall ab; schlaegt auch der Property-Zugriff
-fehl (keine `parameters{}` in der Pipeline definiert), gibt es den Default.
+den Parameter definiert; sonst `false`. Der Zugriff auf `params` laeuft ueber
+ein `try`/`catch` um den Property-Zugriff `params` - schlaegt er fehl (keine
+`parameters{}` in der Pipeline definiert), gibt es den Default. Grund fuer den
+`try`/`catch`: in Jenkins-CPS (workflow-cps) ist `params` keine Eintragung im
+Script-Binding, sondern eine `GlobalVariable`, die erst ueber den
+`MissingPropertyException`-Fallback von `CpsScript.getProperty()` aufgeloest
+wird - ohne `parameters{}` in der Pipeline schlaegt dieser Zugriff mit
+`MissingPropertyException` fehl, statt `params` einfach leer zu liefern.
+(Ein frueherer Entwurf pruefte zusaetzlich `Script.getBinding().hasVariable
+('params')` als vorgelagerte Stufe - der Zweig war wirkungslos, weil `params`
+nie im Script-Binding auftaucht, und `Script.getBinding()` ist im Sandbox
+nicht freigegeben; er zwang die Library dadurch ohne Funktionsgewinn zu einer
+trusted Installation und ist deshalb gestrichen (I-2 im Abschluss-Review).)
+`call()` uebergibt `buildAll: params.BUILD_ALL, skipUpload: params.SKIP_UPLOAD`
+explizit an `build()` - die Vollpipeline haengt damit nie von `paramOr()` ab.
 
 Basis-Berechnung, wenn `base` fehlt: `buildAll ? '' :
 (env.GIT_PREVIOUS_SUCCESSFUL_COMMIT ?: git rev-parse HEAD~1 ?: '')` — wie heute.
@@ -195,7 +200,7 @@ Die Shell-Skripte und ihre Tests sind von diesem Umbau nicht betroffen.
 ## Nicht verifizierbar (wie bisher)
 
 Groovy-Syntax, Declarative-AST-Transformation, CPS-Verhalten der neuen
-Methoden, `binding.hasVariable('params')` in beiden Pipeline-Arten, `parallel`
+Methoden, der `params`-Property-Zugriff in beiden Pipeline-Arten, `parallel`
 mit `stage()` innerhalb eines `script {}`-Blocks einer fremden Stage. Erster
 echter Pruefpunkt bleibt ein Jenkins-Lauf; die Reihenfolge aus dem Plan-Nachtrag
 gilt weiter, ergaenzt um: (0) Laedt das Var mit `call()` **und** benannten

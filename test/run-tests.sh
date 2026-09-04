@@ -169,6 +169,10 @@ STUB
 #   STUB_HTTP       HTTP-Status, den der Upload-Aufruf meldet (Default 204)
 #   STUB_BODY       Body, den der Upload-Aufruf in die --output-Datei schreibt
 #   STUB_CURL_RC    Exit-Code des Stubs (Default 0) - simuliert Netzfehler
+#   STUB_CURL_STDERR Text, den der Stub bei STUB_CURL_RC != 0 auf stderr
+#                    schreibt (I-3: deckt den Diagnosekanal ab, auf dem der
+#                    Umbruch-Guard begruendet ist - 'cat "$ERR_FILE" >&2' im
+#                    Skript muss diesen Text tatsaechlich ausgeben)
 #   STUB_REPOS_JSON JSON, das der Repo-Typ-Check-Aufruf auf stdout liefert
 make_curl_stub() {  # -> Verzeichnis fuer PATH auf stdout
   local d="${TMP}/curl-stub-bin"
@@ -203,6 +207,12 @@ printf '%s' "${STUB_BODY:-}" > "$out"
 # sonst bliebe ein versehentlich gestrichenes --write-out unbemerkt gruen.
 if [[ "$write_out" == 1 ]]; then
   printf '%s' "${STUB_HTTP:-204}"
+fi
+# I-3: im Fehlerfall etwas auf stderr schreiben - so wie echtes curl mit
+# --show-error einen Diagnosetext liefert. Ohne das bliebe unbemerkt, wenn
+# 'cat "$ERR_FILE" >&2' oder '--show-error' aus dem Skript verschwindet.
+if [[ "${STUB_CURL_RC:-0}" != 0 && -n "${STUB_CURL_STDERR:-}" ]]; then
+  printf '%s' "${STUB_CURL_STDERR}" >&2
 fi
 exit "${STUB_CURL_RC:-0}"
 STUB
@@ -979,6 +989,13 @@ assert_contains "POST wird verwendet" "$PUB_ARGS" "POST"
 # ohne diese Assertion bliebe ein versehentlich gestrichenes --write-out
 # unbemerkt gruen (der *-Zweig sieht dann ein leeres $HTTP).
 assert_contains "Status wird per --write-out geholt" "$PUB_ARGS" '%{http_code}'
+# I-2: der Testkatalog der Spec versprach einen Fall "SKIP_REPO_CHECK=1
+# ueberspringt den Repo-Typ-Check (nur ein curl-Aufruf)", den es bisher nicht
+# gab. Jeder curl-Aufruf traegt genau ein '--config'-Argument (die Config kommt
+# ueber stdin) - Vorkommen davon in curl-args zaehlen also Aufrufe, nicht nur
+# irgendein Merkmal des Aufrufs.
+assert_eq "SKIP_REPO_CHECK=1 -> genau ein curl-Aufruf" "1" \
+  "$(grep -c '^--config$' <<<"$PUB_ARGS")"
 
 run_publish created NEXUS_USER=u NEXUS_PASS=p STUB_HTTP=201
 assert_rc "Upload 201 -> rc 0" 0 "$PUB_RC"
@@ -1027,10 +1044,34 @@ run_publish weird NEXUS_USER=u NEXUS_PASS=p STUB_HTTP=500 STUB_BODY='Internal Se
 assert_rc "500 -> rc 1" 1 "$PUB_RC"
 assert_contains "500 -> Status erscheint" "$PUB_OUT" "500"
 
+# I-1: curl-Fehler duerfen curls rohen Exit-Code NICHT durchreichen - 2 und 3
+# sind als "Version existiert" bzw. "falscher Repo-Typ" bereits vergeben, und
+# curl benutzt dieselben Zahlen fuer voellig andere Fehler (z.B. 3 = URL
+# malformed, 2 = Init fehlgeschlagen). Jeder curl-Fehler muss deshalb auf rc 1
+# abgebildet werden; curls Zahl steht nur noch in der Meldung.
 run_publish netz NEXUS_USER=u NEXUS_PASS=p STUB_CURL_RC=7
-if [[ $PUB_RC -ne 0 ]]; then ok "curl-Fehler -> rc != 0"
-else nok "curl-Fehler -> rc != 0" "rc=0"; fi
+assert_rc "curl-Fehler -> rc 1" 1 "$PUB_RC"
 assert_contains "curl-Fehler -> Meldung nennt curl" "$PUB_OUT" "curl"
+assert_contains "curl-Fehler -> Meldung nennt curl-Exit-Code" "$PUB_OUT" "curl-Exit 7"
+
+run_publish netz_rc3 NEXUS_USER=u NEXUS_PASS=p STUB_CURL_RC=3
+assert_rc "curl-Exit 3 kollidiert nicht mit Skript-Exit 3 (falscher Repo-Typ) -> rc 1" 1 "$PUB_RC"
+assert_contains "curl-Exit 3 -> Meldung nennt curl-Exit-Code" "$PUB_OUT" "curl-Exit 3"
+
+run_publish netz_rc2 NEXUS_USER=u NEXUS_PASS=p STUB_CURL_RC=2
+assert_rc "curl-Exit 2 kollidiert nicht mit Skript-Exit 2 (Version existiert) -> rc 1" 1 "$PUB_RC"
+assert_contains "curl-Exit 2 -> Meldung nennt curl-Exit-Code" "$PUB_OUT" "curl-Exit 2"
+
+# I-3: der Diagnosekanal, auf dem der Umbruch-Guard begruendet ist ('cat
+# "$ERR_FILE" >&2' plus '--show-error' im Skript), hatte bisher keine
+# Abdeckung - der Stub liefert jetzt echten Text auf stderr, und der muss beim
+# Aufrufer ankommen.
+run_publish netz_stderr NEXUS_USER=u NEXUS_PASS=p STUB_CURL_RC=35 \
+  STUB_CURL_STDERR='curl: (35) SSL connect error: TLS-Handshake fehlgeschlagen'
+assert_rc "curl-Fehler mit Diagnosetext -> rc 1" 1 "$PUB_RC"
+assert_contains "curl-Fehler -> Diagnosetext (ERR_FILE) landet in der Ausgabe" "$PUB_OUT" \
+  "TLS-Handshake fehlgeschlagen"
+assert_contains "curl-Fehler -> --show-error steht in argv" "$PUB_ARGS" "--show-error"
 
 # Die Kernzusage des Zugangsdaten-Abschnitts im README, erstmals maschinell
 # geprueft: das Passwort steht in der curl-Config auf stdin, nicht in argv.
@@ -1097,6 +1138,11 @@ assert_contains "Repo-Check: hosted/pypi -> OK-Meldung (Upload lief)" "$PUB_OUT"
 if grep -q 'geheim-checked-nicht-in-argv' <<<"$PUB_ARGS"; then
   nok "Repo-Check: Passwort steht NICHT in argv (beide Aufrufe)" "gefunden in curl-args"
 else ok "Repo-Check: Passwort steht NICHT in argv (beide Aufrufe)"; fi
+# I-2: Gegenstueck zum SKIP_REPO_CHECK=1-Fall oben (dort genau ein
+# curl-Aufruf) - ohne die Variable laufen Repo-Typ-Check UND Upload, also
+# zwei curl-Aufrufe (je ein '--config'-Argument).
+assert_eq "ohne SKIP_REPO_CHECK -> genau zwei curl-Aufrufe" "2" \
+  "$(grep -c '^--config$' <<<"$PUB_ARGS")"
 
 # Q-8: ';' und ',' sind im -F-Wert von curl Trennzeichen - ein Archivpfad mit
 # ',' fuehrte ohne Anfuehrungszeichen um den Dateinamen zu

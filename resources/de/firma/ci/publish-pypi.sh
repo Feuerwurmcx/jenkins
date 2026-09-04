@@ -107,9 +107,14 @@ RC=$?
 set -e
 
 if [[ $RC -ne 0 ]]; then
-  echo "FEHLER: curl scheiterte (Exit ${RC}) – Nexus nicht erreichbar?" >&2
+  # curls Exit-Codes nicht durchreichen: 2 und 3 sind hier als "Version
+  # existiert" bzw. "falscher Repo-Typ" vergeben, und curl benutzt dieselben
+  # Zahlen fuer ganz andere Fehler (3 = URL malformed, 2 = Init fehlgeschlagen).
+  # Ein Aufrufer, der auf 2/3 prueft, wuerde sonst den falschen Schluss ziehen.
+  # curls Zahl steht nur noch in der Meldung, nicht mehr im Exit-Code.
+  echo "FEHLER: curl scheiterte (curl-Exit ${RC})" >&2
   cat "$ERR_FILE" >&2
-  exit "$RC"
+  exit 1
 fi
 
 BODY="$(cat "$BODY_FILE")"

@@ -7,6 +7,12 @@
 # als SKIP gemeldet - der Treiber soll nicht gruen aussehen, wo nichts
 # geprueft wurde. Bewusst ohne 'set -e': ein fehlgeschlagener Test soll den
 # Rest des Laufs nicht abschneiden.
+#
+# Ehrlich bleiben (I-4): der Block "vars/pyMonorepo.groovy" unten pinnt Text,
+# Reihenfolge einzelner Zeilen und die withEnv/$VAR-Kopplung je Aufrufstelle -
+# keine Laufzeitsemantik. Insbesondere die Reihenfolge, in der die Steps
+# EINANDER aufrufen (welcher Step vor welchem laeuft), bleibt ungeprueft; das
+# zeigt erst ein echter Jenkins-Lauf.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -469,8 +475,32 @@ GROOVY="${ROOT}/vars/pyMonorepo.groovy"
 if [[ -f "$GROOVY" ]]; then
   ok "vars/pyMonorepo.groovy vorhanden"
 
-  # Kommentare raus, sonst zaehlen Beispiele im Kopfkommentar mit.
-  CODE="$(sed -E 's#//.*$##' "$GROOVY")"
+  # Kommentare raus, sonst zaehlen Beispiele im Kopfkommentar mit. Quoting-
+  # bewusst (I-3): 'sed -E s#//.*$##' schnitt bisher auch '//' MITTEN in
+  # einem String-Literal ab (z.B. eine URL in einem Shell-Kommentar innerhalb
+  # eines sh-Scripts) - der Rest der Zeile inklusive schliessendem Quote fiel
+  # weg, und Test 7 (Injection-Disziplin) sah danach ein unquotiertes
+  # Fragment, das seine eigenen Muster nicht mehr traf, statt der eigentlich
+  # noch offenen (jetzt unsichtbaren) Interpolation. Deshalb zeichenweise
+  # durchgehen, den Quote-Zustand (einfach/doppelt, mit \-Escape) mitfuehren
+  # und '//' nur AUSSERHALB von Quotes als Kommentar werten. Rein
+  # zeilenbasiert - die Datei hat keine mehrzeiligen String-Literale.
+  CODE="$(awk -v sq="'" '
+    {
+      line = $0; out = ""; insq = 0; indq = 0; n = length(line); i = 1
+      while (i <= n) {
+        c = substr(line, i, 1)
+        if (!insq && !indq && c == "/" && i < n && substr(line, i + 1, 1) == "/") { break }
+        if (c == "\\" && (insq || indq) && i < n) {
+          out = out c substr(line, i + 1, 1); i += 2; continue
+        }
+        if (!indq && c == sq) { insq = !insq }
+        else if (!insq && c == "\"") { indq = !indq }
+        out = out c; i++
+      }
+      print out
+    }
+  ' "$GROOVY")"
 
   # Schneidet den Rumpf einer Methode/eines Blocks heraus: von der ersten
   # Zeile, die <nadel> enthaelt, bis zu der Zeile, auf der die ab dort
@@ -680,15 +710,22 @@ $BAD_BARE"; fi
   # gepinnt - Gegenprobe (c) macht diesen Needle-Check rot, wenn "throw
   # abort" durch z.B. "echo 'abort'" ersetzt wird.
 
-  # 10c) params-Zugriff abgesichert (paramOr()): binding.hasVariable('params')
-  #      sieht 'params' in Jenkins-CPS nicht (GlobalVariable, kein Binding-
-  #      Eintrag) - erst der Property-Zugriff (try { p = params }) loest sie
-  #      ueber CpsScript.getProperty() auf. Beide Stufen im Rumpf gepinnt,
-  #      nicht nur als Text irgendwo in der Datei (C-1).
-  assert_contains "paramOr() sichert params per binding.hasVariable ab" "$CODE" "binding.hasVariable('params')"
+  # 10c) params-Zugriff abgesichert (paramOr()) - und I-2: der fruehere tote
+  #      binding.hasVariable('params')-Zweig ist gestrichen (Script.getBinding()
+  #      ist im Sandbox nicht freigegeben und zwang die Library ohne
+  #      Funktionsgewinn zu einer trusted Installation). paramOr() besteht nur
+  #      noch aus dem Property-Zugriff per try/catch; 'binding.' darf in der
+  #      ganzen Datei nicht mehr vorkommen.
+  if ! grep -qF 'binding.' <<<"$CODE"; then ok "kein 'binding.' mehr in der Datei (I-2)"
+  else nok "kein 'binding.' mehr in der Datei (I-2)" "$(grep -nF 'binding.' <<<"$CODE")"; fi
   PARAMOR_BODY="$(step_body 'private boolean paramOr(String name, boolean dflt)')"
-  assert_contains "paramOr(): binding.hasVariable('params') im Rumpf" "$PARAMOR_BODY" "binding.hasVariable('params')"
-  assert_contains "paramOr(): Property-Zugriff als zweite Stufe (try { p = params })" "$PARAMOR_BODY" 'try { p = params }'
+  assert_contains "paramOr(): Property-Zugriff per try { p = params }" "$PARAMOR_BODY" 'try { p = params }'
+
+  # I-2: call() reicht buildAll/skipUpload jetzt explizit an build() durch -
+  # damit faellt der reine Vollpipeline-Nutzer nie in paramOr() und ist von
+  # dessen params-Zugriff unabhaengig.
+  assert_contains "call(): reicht buildAll: params.BUILD_ALL durch (I-2)" "$CALL_BODY" "buildAll: params.BUILD_ALL"
+  assert_contains "call(): reicht skipUpload: params.SKIP_UPLOAD durch (I-2)" "$CALL_BODY" "skipUpload: params.SKIP_UPLOAD"
 
   # I-1/I-2: 'false' as boolean waere true (Groovy-Truthiness) - toBool()
   # ersetzt alle 'as boolean'-Stellen. Kein 'as boolean' mehr in der Datei.
@@ -713,11 +750,106 @@ $BAD_BARE"; fi
   assert_contains "changedPackages(base) delegiert an changedPackages(base, packages)" "$CP1_BODY" "changedPackages(base, '')"
   assert_contains "install() nutzt libDir()" "$INSTALL_BODY" 'libDir()'
 
+  # I-4(a): Groovy<->Shell-Kopplung. Die ganze withEnv-Disziplin beruht
+  # darauf, dass der Groovy-seitige withEnv-Schluessel und die im sh-String
+  # referenzierte Shell-Variable denselben Namen tragen - das war bisher
+  # ungeprueft. Je Aufrufstelle: jedes $NAME im sh-Script-String (ausser
+  # CI_LIB_DIR, das kommt global aus env, nicht aus einem lokalen withEnv)
+  # muss als Schluessel im umschliessenden withEnv([...]) auftauchen. Faengt
+  # z.B. withEnv(["PKG=..."]) -> ["PACKAGE=..."] bei unveraendertem "$PKG" im
+  # sh-String, oder dieselbe Umbenennung bei ARCHIVE/ARCH in meta().
+  check_withenv_coupling() {  # <label> <rumpf>
+    local label="$1" body="$2" refs keys missing r
+    refs="$(grep -oE '\$[A-Z][A-Z0-9_]*' <<<"$body" | tr -d '$' | sort -u | grep -v '^CI_LIB_DIR$' || true)"
+    keys="$(grep -oE '"[A-Z][A-Z0-9_]*=' <<<"$body" | sed -E 's/^"//; s/=$//' | sort -u)"
+    missing=""
+    for r in $refs; do
+      grep -qxF "$r" <<<"$keys" || missing="$missing $r"
+    done
+    if [[ -z "$missing" ]]; then ok "$label: withEnv deckt alle \$NAME-Referenzen im sh-String ab (I-4a)"
+    else nok "$label: withEnv deckt alle \$NAME-Referenzen im sh-String ab (I-4a)" \
+      "fehlende withEnv-Keys fuer:$missing (vorhandene Keys: $keys)"; fi
+  }
+  check_withenv_coupling "changedPackages(base, packages)" "$CP2_BODY"
+  check_withenv_coupling "buildSdist(pkg)" "$BUILD_BODY"
+  check_withenv_coupling "meta(archive, field)" "$META_BODY"
+  check_withenv_coupling "publish(args)" "$PUBLISH_BODY"
+  unset -f check_withenv_coupling
+
+  # I-4(a), Rest: zwei Mutationen, die eine reine Schluessel-Praesenzpruefung
+  # nicht faengt, weil der withEnv-Schluessel gleich bleibt und nur der Wert
+  # bzw. ein anderer String sich aendert - direkt als Volltext-Pin.
+  #   withEnv(["FIELD=${field}"]) -> ["FIELD=name"]: FIELD bleibt Schluessel,
+  #   "$FIELD" bleibt im sh-String stehen, aber FIELD wuerde dann immer den
+  #   Namen statt des angeforderten Feldes tragen.
+  assert_contains "meta(): FIELD kommt per Interpolation aus dem field-Parameter (I-4a)" \
+    "$META_BODY" '"FIELD=${field}"'
+  #   writeFile file: "${dir}/${n}" -> "${n}": schreibt dann ins Arbeits-
+  #   verzeichnis statt nach .ci-lib/, ohne dass ein withEnv-Vergleich das
+  #   sehen koennte (writeFile ist kein sh-Aufruf).
+  assert_contains "install(): writeFile-Pfad enthaelt \${dir}/\${n} (I-4a)" \
+    "$INSTALL_BODY" 'file: "${dir}/${n}"'
+
+  # I-4(b): Secret-Scoping. Der Upload-sh-Schritt muss INNERHALB des
+  # withCredentials-BLOCKS stehen (nicht nur textuell irgendwo dahinter) -
+  # Kernaussage des README-Abschnitts "Umgang mit den Zugangsdaten". Eine
+  # reine Zeilenreihenfolge-Pruefung (withCredentials-Zeile < sh-Zeile) reicht
+  # NICHT: zieht man den sh-Schritt hinter den withCredentials-Block heraus
+  # (M14), steht die withCredentials-Zeile immer noch textuell vor der
+  # sh-Zeile, obwohl der sh-Schritt nicht mehr im Sichtbarkeitsbereich des
+  # Secrets liegt - das war die urspruengliche Fassung dieses Tests (per
+  # Gegenprobe hier selbst als Luecke gefunden). Deshalb: den Block explizit
+  # per Klammertiefe herausschneiden (wie step_body(), aber der Rumpf hier
+  # beginnt erst einige Zeilen NACH der Fundstelle - deshalb erst ab dem
+  # ersten '{' zu zaehlen anfangen) und darin nach dem sh-Aufruf suchen.
+  extract_block() {  # <text> <nadel>
+    local text="$1" pat="$2"
+    awk -v pat="$pat" '
+      BEGIN { grab = 0; depth = 0; started = 0 }
+      grab == 0 && index($0, pat) > 0 { grab = 1 }
+      grab == 1 {
+        print
+        o = gsub(/\{/, "{"); c = gsub(/\}/, "}")
+        if (o > 0) started = 1
+        depth += o - c
+        if (started == 1 && depth <= 0) exit
+      }
+    ' <<<"$text"
+  }
+  WITHCRED_BLOCK="$(extract_block "$PUBLISH_BODY" 'withCredentials([usernamePassword(')"
+  if [[ -n "$WITHCRED_BLOCK" ]] && grep -qF 'CI_LIB_DIR/publish-pypi.sh' <<<"$WITHCRED_BLOCK"; then
+    ok "publish(): sh-Schritt liegt innerhalb von withCredentials (I-4b)"
+  else nok "publish(): sh-Schritt liegt innerhalb von withCredentials (I-4b)" \
+    "sh-Aufruf nicht im withCredentials-Block gefunden: $WITHCRED_BLOCK"; fi
+  unset -f extract_block
+
+  # I-4(c): Defaults ausserhalb von build(). publish() traegt seine eigenen
+  # Defaults fuer hostedRepo/credentialsId - als Volltext gepinnt, damit ein
+  # geaenderter Default (z.B. 'pypi-group' statt 'pypi-hosted', das waere ein
+  # Group- statt Hosted-Repo) auffaellt. Und build() muss das eigene
+  # credentialsId beim Aufruf von publish() durchreichen, statt es stillschweigend
+  # fallen zu lassen.
+  assert_contains "publish(): hostedRepo-Default ist 'pypi-hosted' (I-4c)" "$PUBLISH_BODY" \
+    "\"NEXUS_PYPI_HOSTED=\${args.hostedRepo ?: 'pypi-hosted'}\""
+  assert_contains "publish(): credentialsId-Default ist 'nexus-pypi-deploy' (I-4c)" "$PUBLISH_BODY" \
+    "credentialsId: args.credentialsId ?: 'nexus-pypi-deploy'"
+  assert_contains "build(): reicht credentialsId an publish() durch (I-4c)" "$BUILD_MAP_BODY" \
+    "credentialsId: credentialsId"
+
   # M-6: cleanup() leert env.CI_LIB_DIR, damit ein spaeterer Einzel-Step in
   # derselben Pipeline an requireInstalled() scheitert (klare Fehlermeldung)
   # statt erst in der Shell an einem fehlenden Verzeichnis.
   CLEANUP_BODY="$(step_body 'void cleanup()')"
   assert_contains "cleanup() leert env.CI_LIB_DIR" "$CLEANUP_BODY" "env.CI_LIB_DIR = ''"
+
+  # I-1: cleanup() darf in einer fremden Pipeline nicht deren eigenes dist/
+  # wegreissen - nur die selbst erzeugten sdists entfernen, dist/ nur
+  # wegraeumen, wenn es dadurch leer wird. 'rm -rf dist' darf im Rumpf nicht
+  # mehr vorkommen.
+  assert_contains "cleanup() entfernt nur die eigenen sdists (I-1)" "$CLEANUP_BODY" \
+    "rm -f dist/*.tar.gz; rmdir dist 2>/dev/null || true"
+  if ! grep -qF 'rm -rf dist' <<<"$CLEANUP_BODY"; then ok "cleanup(): kein 'rm -rf dist' mehr (I-1)"
+  else nok "cleanup(): kein 'rm -rf dist' mehr (I-1)" "$(grep -n 'rm -rf dist' <<<"$CLEANUP_BODY")"; fi
 
   # 12) GDK-Iteratoren (I-3): .each/.collect/.findAll/.collectEntries duerfen
   #     nur an den zwei bekannten, unproblematischen Stellen stehen - jede

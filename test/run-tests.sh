@@ -162,6 +162,48 @@ STUB
   printf '%s\n' "$d"
 }
 
+# curl-Stub: kein echtes curl. Schreibt Argumente und stdin mit, damit die Tests
+# pruefen koennen, dass die Zugangsdaten NICHT in argv stehen, und antwortet mit
+# einem per Umgebung gesteuerten HTTP-Status.
+#   STUB_DIR        Verzeichnis fuer curl-args / curl-stdin (Pflicht)
+#   STUB_HTTP       HTTP-Status, den der Upload-Aufruf meldet (Default 204)
+#   STUB_BODY       Body, den der Upload-Aufruf in die --output-Datei schreibt
+#   STUB_CURL_RC    Exit-Code des Stubs (Default 0) - simuliert Netzfehler
+#   STUB_REPOS_JSON JSON, das der Repo-Typ-Check-Aufruf auf stdout liefert
+make_curl_stub() {  # -> Verzeichnis fuer PATH auf stdout
+  local d="${TMP}/curl-stub-bin"
+  mkdir -p "$d"
+  cat > "${d}/curl" <<'STUB'
+#!/usr/bin/env bash
+# curl-Stub aus test/run-tests.sh (make_curl_stub).
+set -u
+: "${STUB_DIR:?STUB_DIR fehlt}"
+printf '%s\n' "$@" >> "${STUB_DIR}/curl-args"
+cat >> "${STUB_DIR}/curl-stdin"
+
+# Zwei Aufrufarten unterscheiden: der Upload nutzt --output <datei>, der
+# Repo-Typ-Check nicht.
+out=""
+prev=""
+for a in "$@"; do
+  if [[ "$prev" == "--output" ]]; then out="$a"; fi
+  prev="$a"
+done
+
+if [[ -z "$out" ]]; then
+  # Repo-Typ-Check
+  printf '%s' "${STUB_REPOS_JSON:-[]}"
+  exit 0
+fi
+
+printf '%s' "${STUB_BODY:-}" > "$out"
+printf '%s' "${STUB_HTTP:-204}"
+exit "${STUB_CURL_RC:-0}"
+STUB
+  chmod +x "${d}/curl"
+  printf '%s\n' "$d"
+}
+
 # Legt das Fixture als echtes Git-Repo an: changed-packages.sh fragt git diff.
 fixture_repo() {  # -> Pfad auf stdout
   local d="${TMP}/repo"
@@ -337,8 +379,6 @@ OUT="$(NEXUS_URL=https://nexus.invalid NEXUS_PYPI_HOSTED= NEXUS_USER=u NEXUS_PAS
 # Argument, ohne NEXUS_URL) - fehlte hier bisher grundlos.
 assert_rc "ohne HOSTED-Repo -> rc 1" 1 "$RC"
 assert_contains "ohne HOSTED-Repo -> Meldung" "$OUT" "NEXUS_PYPI_HOSTED fehlt"
-
-skip "publish-pypi.sh echter Upload" "braucht Netzwerk und ein Nexus - bewusst nicht getestet"
 
 echo
 echo "=== changed-packages.sh ==="
@@ -898,6 +938,87 @@ for EX in "${ROOT}/examples/Jenkinsfile.embedded" "${ROOT}/examples/Jenkinsfile.
     nok "$(basename "$EX") vorhanden" "Datei fehlt"
   fi
 done
+
+echo
+echo "=== publish-pypi.sh Upload (curl-Stub) ==="
+CURL_BIN="$(make_curl_stub)"
+
+# Ruft publish-pypi.sh mit dem Stub im PATH. Setzt STUB_DIR frisch, damit
+# curl-args/curl-stdin je Fall nur den einen Aufruf enthalten.
+# Nutzung: run_publish <unterordner> [zusaetzliche VAR=wert ...]
+# Ergebnis in $PUB_OUT (stdout+stderr), $PUB_RC, $PUB_ARGS, $PUB_STDIN.
+run_publish() {
+  local sub="$1"; shift
+  PUB_D="${TMP}/pub-${sub}"
+  rm -rf "$PUB_D"; mkdir -p "$PUB_D"
+  PUB_OUT="$(env "$@" PATH="${CURL_BIN}:${PATH}" STUB_DIR="$PUB_D" \
+             SKIP_REPO_CHECK=1 \
+             NEXUS_URL=https://nexus.example.com \
+             NEXUS_PYPI_HOSTED=pypi-hosted \
+             bash "$SCRIPTS/publish-pypi.sh" "$ARCHIVE" 2>&1)"
+  PUB_RC=$?
+  PUB_ARGS="$(cat "${PUB_D}/curl-args" 2>/dev/null || true)"
+  PUB_STDIN="$(cat "${PUB_D}/curl-stdin" 2>/dev/null || true)"
+}
+
+run_publish ok NEXUS_USER=u NEXUS_PASS=p STUB_HTTP=204
+assert_rc "Upload 204 -> rc 0" 0 "$PUB_RC"
+assert_contains "Upload 204 -> OK-Meldung" "$PUB_OUT" "OK:"
+assert_contains "URL ist die Components-API" "$PUB_ARGS" \
+  "https://nexus.example.com/service/rest/v1/components?repository=pypi-hosted"
+assert_contains "Formularfeld pypi.asset zeigt aufs Archiv" "$PUB_ARGS" \
+  "pypi.asset=@${ARCHIVE}"
+assert_contains "POST wird verwendet" "$PUB_ARGS" "POST"
+
+run_publish created NEXUS_USER=u NEXUS_PASS=p STUB_HTTP=201
+assert_rc "Upload 201 -> rc 0" 0 "$PUB_RC"
+
+run_publish dup NEXUS_USER=u NEXUS_PASS=p STUB_HTTP=400 \
+  STUB_BODY='{"message":"Repository does not allow updating assets"}'
+assert_rc "400 + does not allow updating -> rc 2" 2 "$PUB_RC"
+assert_contains "400 -> Meldung nennt Version-Bump" "$PUB_OUT" "Version im Paket erhoehen"
+
+run_publish dup2 NEXUS_USER=u NEXUS_PASS=p STUB_HTTP=400 \
+  STUB_BODY='package alpha-1.0.tar.gz already exists'
+assert_rc "400 + already exists -> rc 2" 2 "$PUB_RC"
+
+run_publish bad400 NEXUS_USER=u NEXUS_PASS=p STUB_HTTP=400 \
+  STUB_BODY='Malformed component'
+assert_rc "400 mit anderem Body -> rc 1" 1 "$PUB_RC"
+assert_contains "400 mit anderem Body -> Body erscheint" "$PUB_OUT" "Malformed component"
+
+run_publish auth NEXUS_USER=u NEXUS_PASS=p STUB_HTTP=401
+assert_rc "401 -> rc 1" 1 "$PUB_RC"
+assert_contains "401 -> Meldung nennt Zugangsdaten" "$PUB_OUT" "Zugangsdaten"
+
+run_publish notfound NEXUS_USER=u NEXUS_PASS=p STUB_HTTP=404
+assert_rc "404 -> rc 1" 1 "$PUB_RC"
+assert_contains "404 -> Meldung nennt das Repository" "$PUB_OUT" "pypi-hosted"
+
+run_publish weird NEXUS_USER=u NEXUS_PASS=p STUB_HTTP=500 STUB_BODY='Internal Server Error'
+assert_rc "500 -> rc 1" 1 "$PUB_RC"
+assert_contains "500 -> Status erscheint" "$PUB_OUT" "500"
+
+run_publish netz NEXUS_USER=u NEXUS_PASS=p STUB_CURL_RC=7
+if [[ $PUB_RC -ne 0 ]]; then ok "curl-Fehler -> rc != 0"
+else nok "curl-Fehler -> rc != 0" "rc=0"; fi
+assert_contains "curl-Fehler -> Meldung nennt curl" "$PUB_OUT" "curl"
+
+# Die Kernzusage des Zugangsdaten-Abschnitts im README, erstmals maschinell
+# geprueft: das Passwort steht in der curl-Config auf stdin, nicht in argv.
+run_publish secret NEXUS_USER=deploy-user NEXUS_PASS=s3cr3t-nicht-in-argv STUB_HTTP=204
+if grep -q 's3cr3t-nicht-in-argv' <<<"$PUB_ARGS"; then
+  nok "Passwort steht NICHT in argv" "gefunden in curl-args"
+else ok "Passwort steht NICHT in argv"; fi
+assert_contains "Passwort steht in der curl-Config auf stdin" "$PUB_STDIN" "s3cr3t-nicht-in-argv"
+assert_contains "Benutzername steht in der curl-Config" "$PUB_STDIN" "deploy-user"
+
+# Sonderzeichen im Passwort: " und \ sind im curl-Config-Format Steuerzeichen.
+run_publish escape NEXUS_USER=u 'NEXUS_PASS=pa"ss\wort' STUB_HTTP=204
+assert_contains 'Passwort mit " wird escaped' "$PUB_STDIN" 'pa\"ss'
+assert_contains 'Passwort mit \ wird escaped' "$PUB_STDIN" 'ss\\wort'
+
+skip "publish-pypi.sh echter Netzwerk-Upload" "braucht ein erreichbares Nexus - bewusst nicht getestet"
 
 echo
 echo "=== Bilanz ==="

@@ -585,8 +585,9 @@ $BAD_BARE"; fi
                 "archiveArtifacts artifacts: 'dist/*.tar.gz'" \
                 "post {" \
                 "cleanup {" \
-                "this.cleanup()" \
-                "build(" \
+                "script { this.cleanup() }" \
+                "this.build(nexusUrl: cfg.nexusUrl, hostedRepo: cfg.hostedRepo," \
+                "packages: cfg.packages" \
                 "archive: false" \
                 "cleanup: false"; do
     assert_contains "call(): enthaelt [$NEEDLE]" "$CALL_BODY" "$NEEDLE"
@@ -631,14 +632,52 @@ $BAD_BARE"; fi
                 "publish(archive: archive" \
                 "finally" \
                 "archiveArtifacts" \
-                "cleanup()"; do
+                "cleanup()" \
+                'echo "SKIP_UPLOAD/skipUpload gesetzt' \
+                "if (unknown) {" \
+                "if (!(k in allowed)) { unknown << k }" \
+                "if (!args.nexusUrl) {" \
+                "if (doArchive) {" \
+                "if (doCleanup) {" \
+                "boolean doArchive  = args.containsKey('archive')    ? toBool(args.archive, true)     : true" \
+                "boolean doCleanup  = args.containsKey('cleanup')    ? toBool(args.cleanup, true)     : true" \
+                "boolean buildAll   = args.containsKey('buildAll')   ? toBool(args.buildAll, false)   : paramOr('BUILD_ALL', false)" \
+                "boolean skipUpload = args.containsKey('skipUpload') ? toBool(args.skipUpload, false) : paramOr('SKIP_UPLOAD', false)" \
+                "String hostedRepo    = args.hostedRepo    ?: 'pypi-hosted'" \
+                "String credentialsId = args.credentialsId ?: 'nexus-pypi-deploy'" \
+                "nexusUrl: args.nexusUrl" \
+                "archiveArtifacts artifacts: 'dist/*.tar.gz', allowEmptyArchive: true, fingerprint: true" \
+                "catch (Exception e)"; do
     assert_contains "build(): enthaelt [$NEEDLE]" "$BUILD_MAP_BODY" "$NEEDLE"
   done
 
-  # 10c) params-Zugriff abgesichert (paramOr()): ohne binding.hasVariable
-  #      wuerde ein eingebetteter build()-Aufruf in einer Pipeline ohne
-  #      parameters{} mit MissingPropertyException sterben.
+  # I-5: das Aufraeumen im finally (archivieren, cleanup()) steckt in einem
+  # eigenen try/catch - eine Exception dort (z.B. rm -rf bei Agent-Verlust)
+  # soll nicht die eigentliche Ursache aus dem try-Block verdecken.
+  ARCHIVE_LINE="$(grep -n 'archiveArtifacts' <<<"$BUILD_MAP_BODY" | head -1 | cut -d: -f1)"
+  CLEANUP_CALL_LINE="$(grep -n 'cleanup()' <<<"$BUILD_MAP_BODY" | tail -1 | cut -d: -f1)"
+  if [[ -n "$ARCHIVE_LINE" && -n "$CLEANUP_CALL_LINE" && "$ARCHIVE_LINE" -lt "$CLEANUP_CALL_LINE" ]]; then
+    ok "build(): archiveArtifacts steht im finally vor cleanup()"
+  else nok "build(): archiveArtifacts steht im finally vor cleanup()" \
+    "archiveArtifacts=Zeile [$ARCHIVE_LINE], cleanup()=Zeile [$CLEANUP_CALL_LINE]"; fi
+
+  # 10c) params-Zugriff abgesichert (paramOr()): binding.hasVariable('params')
+  #      sieht 'params' in Jenkins-CPS nicht (GlobalVariable, kein Binding-
+  #      Eintrag) - erst der Property-Zugriff (try { p = params }) loest sie
+  #      ueber CpsScript.getProperty() auf. Beide Stufen im Rumpf gepinnt,
+  #      nicht nur als Text irgendwo in der Datei (C-1).
   assert_contains "paramOr() sichert params per binding.hasVariable ab" "$CODE" "binding.hasVariable('params')"
+  PARAMOR_BODY="$(step_body 'private boolean paramOr(String name, boolean dflt)')"
+  assert_contains "paramOr(): binding.hasVariable('params') im Rumpf" "$PARAMOR_BODY" "binding.hasVariable('params')"
+  assert_contains "paramOr(): Property-Zugriff als zweite Stufe (try { p = params })" "$PARAMOR_BODY" 'try { p = params }'
+
+  # I-1/I-2: 'false' as boolean waere true (Groovy-Truthiness) - toBool()
+  # ersetzt alle 'as boolean'-Stellen. Kein 'as boolean' mehr in der Datei.
+  if ! grep -qE 'as boolean' <<<"$CODE"; then ok "kein 'as boolean' mehr in der Datei (I-1/I-2)"
+  else nok "kein 'as boolean' mehr in der Datei (I-1/I-2)" "$(grep -nE 'as boolean' <<<"$CODE")"; fi
+  TOBOOL_BODY="$(step_body 'private boolean toBool(Object v, boolean dflt)')"
+  assert_contains "toBool() parst Strings, statt Truthiness zu nutzen" "$TOBOOL_BODY" \
+    "return v.toString().trim().equalsIgnoreCase('true')"
 
   # 11) Step-Vertrag (I-1): requireInstalled() und die Delegation von
   #     changedPackages(base) an changedPackages(base, packages) duerfen
@@ -654,6 +693,12 @@ $BAD_BARE"; fi
   assert_contains "publish() prueft requireInstalled()" "$PUBLISH_BODY" 'requireInstalled()'
   assert_contains "changedPackages(base) delegiert an changedPackages(base, packages)" "$CP1_BODY" "changedPackages(base, '')"
   assert_contains "install() nutzt libDir()" "$INSTALL_BODY" 'libDir()'
+
+  # M-6: cleanup() leert env.CI_LIB_DIR, damit ein spaeterer Einzel-Step in
+  # derselben Pipeline an requireInstalled() scheitert (klare Fehlermeldung)
+  # statt erst in der Shell an einem fehlenden Verzeichnis.
+  CLEANUP_BODY="$(step_body 'void cleanup()')"
+  assert_contains "cleanup() leert env.CI_LIB_DIR" "$CLEANUP_BODY" "env.CI_LIB_DIR = ''"
 
   # 12) GDK-Iteratoren (I-3): .each/.collect/.findAll/.collectEntries duerfen
   #     nur an den zwei bekannten, unproblematischen Stellen stehen - jede

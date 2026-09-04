@@ -99,9 +99,16 @@ Laeuft innerhalb einer Stage des Aufrufers. Ablauf:
 
 Parameterfluss fuer `buildAll`/`skipUpload`: Argument, wenn im Map vorhanden
 (auch `false` zaehlt als vorhanden); sonst `params.<NAME>`, wenn die Pipeline
-den Parameter definiert; sonst `false`. Der Zugriff auf `params` ist mit
-`binding.hasVariable('params')` abgesichert, damit der Step auch in Kontexten
-ohne `params` laeuft.
+den Parameter definiert; sonst `false`. Der Zugriff auf `params` ist zweistufig
+abgesichert: zuerst `binding.hasVariable('params')`, dann - falls das `false`
+liefert - ein `try`/`catch` um den Property-Zugriff `params`. Grund: in
+Jenkins-CPS (workflow-cps) ist `params` keine Eintragung im Binding, sondern
+eine `GlobalVariable`, die erst ueber den `MissingPropertyException`-Fallback
+von `CpsScript.getProperty()` aufgeloest wird - `binding.hasVariable('params')`
+liefert dafuer immer `false` und waere allein wirkungslos (haette `paramOr()`
+immer auf den Default zurueckfallen lassen, auch wenn `params` existierte).
+Die zweite Stufe deckt genau diesen Fall ab; schlaegt auch der Property-Zugriff
+fehl (keine `parameters{}` in der Pipeline definiert), gibt es den Default.
 
 Basis-Berechnung, wenn `base` fehlt: `buildAll ? '' :
 (env.GIT_PREVIOUS_SUCCESSFUL_COMMIT ?: git rev-parse HEAD~1 ?: '')` — wie heute.

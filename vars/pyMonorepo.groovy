@@ -74,9 +74,13 @@ def call(Closure body) {
                     script {
                         // Archivieren und Aufraeumen macht der post-Block unten -
                         // der laeuft auch, wenn build() abbricht.
-                        build(nexusUrl: cfg.nexusUrl, hostedRepo: cfg.hostedRepo,
-                              credentialsId: cfg.credentialsId, packages: cfg.packages,
-                              archive: false, cleanup: false)
+                        // this.build(): 'build' ist auch ein globaler Step
+                        // (pipeline-build-step-Plugin) - ohne 'this.' waere
+                        // der Aufruf zweideutig, symmetrisch zu this.cleanup()
+                        // im post-Block unten.
+                        this.build(nexusUrl: cfg.nexusUrl, hostedRepo: cfg.hostedRepo,
+                                   credentialsId: cfg.credentialsId, packages: cfg.packages,
+                                   archive: false, cleanup: false)
                     }
                 }
             }
@@ -116,6 +120,11 @@ def call(Closure body) {
 //   cleanup (true)        - dist/ und .ci-lib/ am Ende entfernen
 // archive/cleanup auf false setzen, wenn der eigene post-Block das uebernimmt
 // (dann dort pyMonorepo.cleanup() aufrufen). Rueckgabe: Paket -> "name version".
+//
+// Fuer Abbruchfestigkeit (Timeout/Abort): archive: false, cleanup: false
+// setzen und einen eigenen post-Block ergaenzen, der pyMonorepo.cleanup()
+// aufruft - Steps im finally dieser Methode laufen bei Abbruch/Timeout nicht
+// zuverlaessig. So macht es die Vollpipeline (call()) oben.
 Map build(Map args) {
     List allowed = ['nexusUrl', 'hostedRepo', 'credentialsId', 'packages', 'buildAll', 'skipUpload', 'base', 'archive', 'cleanup']
     List unknown = []
@@ -128,10 +137,10 @@ Map build(Map args) {
     if (!args.nexusUrl) {
         error 'pyMonorepo.build: nexusUrl fehlt - Basis-URL der Nexus-Instanz setzen'
     }
-    boolean doArchive  = args.containsKey('archive')    ? (args.archive    as boolean) : true
-    boolean doCleanup  = args.containsKey('cleanup')    ? (args.cleanup    as boolean) : true
-    boolean buildAll   = args.containsKey('buildAll')   ? (args.buildAll   as boolean) : paramOr('BUILD_ALL', false)
-    boolean skipUpload = args.containsKey('skipUpload') ? (args.skipUpload as boolean) : paramOr('SKIP_UPLOAD', false)
+    boolean doArchive  = args.containsKey('archive')    ? toBool(args.archive, true)     : true
+    boolean doCleanup  = args.containsKey('cleanup')    ? toBool(args.cleanup, true)     : true
+    boolean buildAll   = args.containsKey('buildAll')   ? toBool(args.buildAll, false)   : paramOr('BUILD_ALL', false)
+    boolean skipUpload = args.containsKey('skipUpload') ? toBool(args.skipUpload, false) : paramOr('SKIP_UPLOAD', false)
     String hostedRepo    = args.hostedRepo    ?: 'pypi-hosted'
     String credentialsId = args.credentialsId ?: 'nexus-pypi-deploy'
     Map versions = [:]   // CPS-Branches laufen kooperativ, kein Sync noetig
@@ -159,7 +168,7 @@ Map build(Map args) {
                     echo "${pkg}: ${distName} ${version}"
 
                     if (skipUpload) {
-                        echo "skipUpload – ${archive} nicht hochgeladen"
+                        echo "SKIP_UPLOAD/skipUpload gesetzt – ${archive} nicht hochgeladen"
                     } else {
                         publish(archive: archive, nexusUrl: args.nexusUrl,
                                 hostedRepo: hostedRepo, credentialsId: credentialsId)
@@ -172,12 +181,19 @@ Map build(Map args) {
         currentBuild.description = versions.sort().collect { k, v -> v }.join(', ')
         return versions
     } finally {
-        // Erst archivieren, dann aufraeumen - sonst ist dist/ schon weg.
-        if (doArchive) {
-            archiveArtifacts artifacts: 'dist/*.tar.gz', allowEmptyArchive: true, fingerprint: true
-        }
-        if (doCleanup) {
-            cleanup()
+        // Bei Abort/Timeout sind Steps im finally unzuverlaessig; eine
+        // Exception hier (z.B. rm -rf bei Agent-Verlust) darf nicht die
+        // eigentliche Ursache aus dem try-Block verdecken (I-5).
+        try {
+            // Erst archivieren, dann aufraeumen - sonst ist dist/ schon weg.
+            if (doArchive) {
+                archiveArtifacts artifacts: 'dist/*.tar.gz', allowEmptyArchive: true, fingerprint: true
+            }
+            if (doCleanup) {
+                cleanup()
+            }
+        } catch (Exception e) {
+            echo "pyMonorepo.build: Aufraeumen fehlgeschlagen: ${e}"
         }
     }
 }
@@ -285,6 +301,11 @@ void cleanup() {
     if (env.CI_LIB_DIR) {
         sh 'rm -rf "$CI_LIB_DIR"'
     }
+    // Leeren, nicht nur den Ordner loeschen: ein spaeterer Einzel-Step in
+    // derselben Pipeline soll an requireInstalled() mit einer klaren
+    // Fehlermeldung scheitern, nicht erst in der Shell an einem fehlenden
+    // Verzeichnis (M-6).
+    env.CI_LIB_DIR = ''
 }
 
 // ---------------------------------------------------------------------------
@@ -305,12 +326,35 @@ private void requireInstalled() {
 }
 
 // params existiert nur, wenn die Pipeline Parameter definiert (und in manchen
-// Kontexten gar nicht). Ohne die Absicherung wuerde ein eingebetteter Aufruf in
+// Kontexten gar nicht) - und ist in Jenkins-CPS eine GlobalVariable, kein
+// Eintrag im Binding: binding.hasVariable('params') sieht sie deshalb NICHT
+// (liefert immer false), erst der Property-Zugriff (ueber
+// CpsScript.getProperty()s MissingPropertyException-Fallback) loest sie auf.
+// Deshalb zwei Stufen: zuerst binding.hasVariable() pruefen (deckt ab, falls
+// 'params' dort doch einmal steht), sonst per try/catch den Property-Zugriff
+// versuchen - schlaegt der fehl (keine Pipeline-Parameter definiert), gibt es
+// den Default. Ohne diese Absicherung wuerde ein eingebetteter Aufruf in
 // einer Pipeline ohne parameters{} mit MissingPropertyException sterben.
 private boolean paramOr(String name, boolean dflt) {
-    if (!binding.hasVariable('params')) { return dflt }
-    def p = params
-    return p.containsKey(name) ? (p[name] as boolean) : dflt
+    def p = null
+    if (binding.hasVariable('params')) {
+        p = binding.getVariable('params')
+    } else {
+        try { p = params } catch (Exception ignored) { return dflt }
+    }
+    if (!(p instanceof Map) || !p.containsKey(name)) { return dflt }
+    return toBool(p[name], dflt)
+}
+
+// 'false' as boolean waere true (Groovy-Truthiness: ein nicht-leerer String
+// ist wahr) - betrifft jeden Boolean-Parameter, der als String hereinkommt
+// (z.B. string(name: 'SKIP_UPLOAD', defaultValue: 'false') in der
+// einbettenden Pipeline). Strings werden deshalb geparst, Booleans
+// durchgereicht, alles andere faellt auf den Default zurueck (I-1/I-2).
+private boolean toBool(Object v, boolean dflt) {
+    if (v == null) { return dflt }
+    if (v instanceof Boolean) { return (Boolean) v }
+    return v.toString().trim().equalsIgnoreCase('true')
 }
 
 // Basis fuer den Diff: letzter erfolgreicher Build (Git-Plugin setzt das),

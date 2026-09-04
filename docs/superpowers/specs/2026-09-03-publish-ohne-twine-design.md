@@ -39,7 +39,7 @@ Aufrufform:
 ```bash
 HTTP="$(cfg_credentials | curl --config - --silent --show-error \
           --output "$BODY_FILE" --write-out '%{http_code}' \
-          --request POST --form "pypi.asset=@${ARCHIVE}" \
+          --request POST --form "pypi.asset=@\"${ARCHIVE}\"" \
           "$UPLOAD_URL" 2>"$ERR_FILE")"
 ```
 
@@ -49,7 +49,7 @@ dem Fliesstext von twine geraten werden.
 
 | Fall | Verhalten |
 |---|---|
-| curl selbst scheitert (rc != 0: Netz, TLS, DNS) | Exit mit curl-Exit-Code, Inhalt von `$ERR_FILE` nach stderr |
+| curl selbst scheitert (rc != 0: Netz, TLS, DNS) | Exit 1 (siehe Nachtrag unten), Inhalt von `$ERR_FILE` nach stderr |
 | 201 oder 204 | `OK: <basename>`, Exit 0 |
 | 400 **und** Body enthaelt `already exists` oder `does not allow updating` (case-insensitive) | Exit 2, "Version liegt bereits im Repo. Version im Paket erhoehen." |
 | 400 sonst | Exit 1, Status und Body ausgeben |
@@ -110,7 +110,10 @@ Neue Faelle:
 * das Formularfeld heisst `pypi.asset` und zeigt auf das uebergebene Archiv
 * **das Passwort steht nicht in argv** (Stub-Argumente werden danach durchsucht)
 * ein Passwort mit `"` und `\` kommt escaped in der curl-Config an
-* `SKIP_REPO_CHECK=1` ueberspringt den Repo-Typ-Check (nur ein curl-Aufruf)
+* `SKIP_REPO_CHECK=1` ueberspringt den Repo-Typ-Check: genau ein curl-Aufruf
+  (gezaehlt an den Vorkommen von `--config` in `curl-args`, das jeder
+  Aufruf genau einmal traegt); ohne die Variable laufen Repo-Typ-Check und
+  Upload, also zwei
 
 Der Stub liegt wie der python3-Stub nur fuer den jeweiligen Aufruf vorn im PATH,
 nicht global. Die bestehenden Guard-Clause-Tests (fehlendes Argument, fehlende
@@ -139,3 +142,46 @@ entnommen und hier nicht ausfuehrbar. Der erste echte Lauf gegen ein Test-Repo
 muss das bestaetigen; der "sonst"-Zweig gibt Status und Body aus, damit ein
 abweichender Status sofort sichtbar ist statt stillschweigend als Erfolg oder
 als falscher Exit-Code durchzugehen.
+
+## Nachtrag 2026-09-03: vier Entscheidungen aus der Umsetzung
+
+Beim Abschluss-Review (I-2) fiel auf, dass vier Entscheidungen, die waehrend
+der Umsetzung getroffen wurden, in dieser Spec nicht vorkamen - obwohl der
+Plan sie als verbindliche Quelle nennt. Nachgetragen:
+
+**(a) Zeilenumbruch-Guard vor jedem curl-Aufruf.** Ein Zeilenumbruch in
+`NEXUS_USER`/`NEXUS_PASS` kann die curl-Config (ein Wert pro Zeile) nicht
+darstellen: curl bricht beim Parsen ab und zitiert die zweite Zeile woertlich
+im Fehlertext, der per `cat "$ERR_FILE" >&2` ins Build-Log geht - Jenkins
+maskiert dort nur das VOLLE Secret, nicht ein Fragment davon. `publish-pypi.sh`
+lehnt einen solchen Wert deshalb vorab mit Exit 1 und eigener Meldung ab,
+bevor ueberhaupt ein curl-Aufruf stattfindet. Empirisch belegt: curl ohne
+diesen Guard, gefuettert mit einer zweizeiligen Config, zitiert das Fragment
+woertlich auf stderr ("`'geheimB"' is unknown`").
+
+**(b) `--form` mit Anfuehrungszeichen um den Pfad.** `--form
+"pypi.asset=@\"${ARCHIVE}\""` statt der oben (Abschnitt "Upload") urspruenglich
+gezeigten Form ohne Quotes. Ohne die Quotes deutet curl `;` und `,` im Wert als
+Trennzeichen - ein Archivpfad mit `,` scheiterte gemessen mit
+"`curl: (26) Failed to open/read local data`" statt hochzuladen.
+
+**(c) `check_repo_type` wird ueber `STUB_REPOS_JSON` getestet.** Vier Faelle:
+group, proxy, hosted mit falschem Format (kein `pypi`), hosted/pypi (laesst
+den Upload tatsaechlich laufen). Der Testtreiber steuert das Antwort-JSON des
+Repo-Typ-Check-Aufrufs ueber die Umgebungsvariable `STUB_REPOS_JSON` des
+curl-Stubs.
+
+**(d) `trap 'rm -f "$BODY_FILE" "${ERR_FILE:-}"' EXIT` steht direkt nach dem
+ersten `mktemp`.** So raeumt der Trap auch dann auf, wenn zwischen den beiden
+`mktemp`-Aufrufen (oder danach) etwas fehlschlaegt - nicht erst, nachdem beide
+Temp-Dateien existieren.
+
+Ausserdem, im Zusammenhang mit (a): curl-Fehler enden mit Exit 1, nicht mit
+curls rohem Exit-Code (Abschluss-Review I-1). curl benutzt 2 und 3 fuer eigene
+Fehler (z. B. 3 = URL malformed), und genau diese Zahlen sind hier bereits als
+"Version existiert" bzw. "falscher Repo-Typ" vergeben - ein Aufrufer, der auf
+2/3 prueft, wuerde sonst bei einem curl-Fehler den falschen Schluss ziehen.
+curls Exit-Code steht seither nur noch in der Fehlermeldung
+("`FEHLER: curl scheiterte (curl-Exit <n>)`"), nicht mehr im Exit-Code des
+Skripts. Die Tabelle im Abschnitt "Upload" und Zeile 42 dieser Spec sind
+entsprechend korrigiert.

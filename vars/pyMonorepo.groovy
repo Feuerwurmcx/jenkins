@@ -105,8 +105,8 @@ def call(Closure body) {
                             [ (pkg): {
                                 stage(pkg) {
                                     String archive  = buildSdist(pkg)
-                                    String distName = meta(archive, 'name')
                                     String version  = meta(archive, 'version')
+                                    String distName = meta(archive, 'name')
                                     echo "${pkg}: ${distName} ${version}"
 
                                     if (params.SKIP_UPLOAD) {
@@ -135,7 +135,10 @@ def call(Closure body) {
                                  allowEmptyArchive: true, fingerprint: true
             }
             cleanup {
-                script { cleanup() }
+                // this.cleanup(): im post-Block heisst 'cleanup' schon der
+                // umschliessende Post-Condition-Block - ohne 'this.' waere
+                // der Aufruf zweideutig zwischen der Closure und dem Step.
+                script { this.cleanup() }
             }
         }
     }

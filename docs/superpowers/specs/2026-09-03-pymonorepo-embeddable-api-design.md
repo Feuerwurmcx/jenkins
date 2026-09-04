@@ -48,8 +48,12 @@ Gemeinsame Regeln:
   Paketliste) geht per `withEnv` in die Umgebung; der `sh`-String ist einfach
   gequotet und referenziert die Shell-Variable. Nie Groovy-Interpolation in
   einen `sh`-String. Das ist dieselbe Disziplin wie beim Nexus-Secret.
-* Jeder Step ausser `install()` prueft `env.CI_LIB_DIR` und bricht mit
-  `error 'pyMonorepo: install() wurde nicht aufgerufen'` ab, wenn es fehlt.
+* Jeder Step ausser `install()` und `cleanup()` prueft `env.CI_LIB_DIR` und
+  bricht mit `error 'pyMonorepo: install() wurde nicht aufgerufen'` ab, wenn
+  es fehlt. `cleanup()` bewusst nicht: es laeuft aus dem `post`-Block, auch
+  wenn `install()` nie erreicht wurde (z. B. weil `Setup` schon vorher
+  scheitert) - eine Pruefung dort wuerde jeden solchen Build zusaetzlich rot
+  faerben, obwohl es nichts aufzuraeumen gibt.
 
 | Step | Signatur | Verhalten |
 |---|---|---|
@@ -57,7 +61,7 @@ Gemeinsame Regeln:
 | `changedPackages(base)` | `List<String> changedPackages(String base)` | Ruft `changed-packages.sh "$BASE"`; leere Basis heisst "alles". `PACKAGES` leer. |
 | `changedPackages(base, packages)` | `List<String> changedPackages(String base, String packages)` | Wie oben, `PACKAGES` gesetzt. |
 | `buildSdist(pkg)` | `String buildSdist(String pkg)` | Ruft `build-sdist.sh "$PKG"`, gibt den Archivpfad (`dist/<datei>`) zurueck. |
-| `meta(archive, field)` | `String meta(String archive, String field)` | Ruft `sdist-meta.sh "$ARCHIVE" <field>`; `field` ist `name` oder `version` (Groovy-seitig validiert, weil es in den sh-String muss). |
+| `meta(archive, field)` | `String meta(String archive, String field)` | Ruft `sdist-meta.sh "$ARCHIVE" <field>`; `field` ist `name` oder `version` (Whitelist als zweite Sicherung; geht per withEnv rein). |
 | `publish(args)` | `void publish(Map args)` | Pflicht: `archive`, `nexusUrl`. Optional: `hostedRepo` (`pypi-hosted`), `credentialsId` (`nexus-pypi-deploy`). `withCredentials` nur um den einen `sh`-Schritt. |
 | `cleanup()` | `void cleanup()` | `rm -rf dist` und `rm -rf "$CI_LIB_DIR"` (nur wenn gesetzt). Idempotent. |
 

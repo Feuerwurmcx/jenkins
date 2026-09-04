@@ -472,20 +472,45 @@ if [[ -f "$GROOVY" ]]; then
   # Kommentare raus, sonst zaehlen Beispiele im Kopfkommentar mit.
   CODE="$(sed -E 's#//.*$##' "$GROOVY")"
 
+  # Schneidet den Rumpf einer Methode/eines Blocks heraus: von der ersten
+  # Zeile, die <nadel> enthaelt, bis zu der Zeile, auf der die ab dort
+  # gezaehlte Klammertiefe wieder auf 0 faellt - funktioniert fuer einzeilige
+  # Rumpfe (private String libDir() { return '...' }) genauso wie fuer
+  # mehrzeilige. Die folgenden Tests pruefen damit den tatsaechlichen
+  # Methodenkoerper statt irgendeine Fundstelle in der ganzen Datei - eine
+  # Mutation *innerhalb* einer Methode kann sich nicht mehr hinter einer
+  # zufaelligen Fundstelle anderswo verstecken (C-1, I-1, I-2).
+  step_body() {  # <nadel>
+    awk -v pat="$1" '
+      BEGIN { grab = 0; depth = 0 }
+      grab == 0 && index($0, pat) > 0 { grab = 1 }
+      grab == 1 {
+        print
+        depth += gsub(/\{/, "{") - gsub(/\}/, "}")
+        if (depth <= 0) exit
+      }
+    ' <<<"$CODE"
+  }
+
   # 1) Skriptliste in install() == vorhandene Skripte
   NAMES_LINE="$(grep -oE "List names = \[[^]]*\]" <<<"$CODE")"
   NAMED="$(grep -oE "'[A-Za-z][A-Za-z0-9_.-]*\.sh'" <<<"$NAMES_LINE" | tr -d "'" | sort -u)"
   HAVE="$(cd "$SCRIPTS" && ls *.sh | sort -u)"
   assert_eq "install()-Liste == vorhandene Skripte" "$HAVE" "$NAMED"
 
-  # 2) libraryResource: Pfad und Encoding
+  # 2) libraryResource: Pfad und Encoding. M-3: auf den vollen Aufruf scharf
+  #    (nicht nur das Praefix des Pfads, das auch ein woanders zusammen-
+  #    gebauter String erfuellen wuerde).
   LR="$(grep -oE 'libraryResource\([^)]*\)' <<<"$CODE")"
-  assert_contains "libraryResource-Pfad ist de/firma/ci" "$LR" 'de/firma/ci/'
+  assert_contains "libraryResource-Pfad ist de/firma/ci/\${n}" "$LR" 'resource: "de/firma/ci/${n}"'
   assert_contains "libraryResource liest mit encoding UTF-8" "$LR" "encoding: 'UTF-8'"
 
-  # 3) Zielverzeichnis mit fuehrendem Punkt, an genau einer Stelle definiert
-  LIBDIR="$(grep -oE "String libDir\(\) \{ return '[^']*' \}" <<<"$CODE" | sed -E "s/.*return '([^']*)'.*/\1/")"
-  if [[ "$LIBDIR" == .* ]]; then ok "libDir() beginnt mit einem Punkt ($LIBDIR)"
+  # 3) Zielverzeichnis mit fuehrendem Punkt. M-2: Rumpf schneiden statt
+  #    starrem Einzeiler-Muster, damit ein Umbruch in libDir() den Test nicht
+  #    blind rot macht, ohne dass sich etwas Relevantes geaendert hat.
+  LIBDIR_BODY="$(step_body 'private String libDir()')"
+  LIBDIR="$(grep -oE "return '[^']*'" <<<"$LIBDIR_BODY" | head -1 | sed -E "s/return '([^']*)'/\1/")"
+  if [[ -n "$LIBDIR" && "$LIBDIR" == .* ]]; then ok "libDir() beginnt mit einem Punkt ($LIBDIR)"
   else nok "libDir() beginnt mit einem Punkt" "ist [$LIBDIR]"; fi
 
   # 4) Genau eine sh-Aufrufstelle je Skript (Steps sind Single-Source)
@@ -503,29 +528,120 @@ if [[ -f "$GROOVY" ]]; then
     else nok "Methode vorhanden: $SIG" "nicht gefunden"; fi
   done
 
-  # 6) Kein Default-Parameter (CPS: synthetische Ueberladung)
-  DEFAULTS="$(grep -nE '^[A-Za-z].*\([^)]*=[^)]*\)\s*\{' <<<"$CODE" || true)"
+  # 6) Kein Default-Parameter (CPS: synthetische Ueberladung). M-4:
+  #    [[:space:]] statt \s - BSD-grep/-E kennt kein Perl-\s.
+  DEFAULTS="$(grep -nE '^[A-Za-z].*\([^)]*=[^)]*\)[[:space:]]*\{' <<<"$CODE" || true)"
   if [[ -z "$DEFAULTS" ]]; then ok "keine Methode mit Default-Parameter"
   else nok "keine Methode mit Default-Parameter" "$DEFAULTS"; fi
 
-  # 7) Injection-Disziplin: jeder sh-Script-String ist einfach gequotet.
-  #    Ein doppelt gequoteter sh-String (sh "..." oder script: "...") waere
-  #    ein Rueckfall in Groovy-Interpolation.
-  BAD_SH="$(grep -nE "(^|[^A-Za-z_])sh[[:space:]]*(\(|[[:space:]])[^']*\"" <<<"$CODE" \
-            | grep -vE "script:[[:space:]]*'" || true)"
-  if [[ -z "$BAD_SH" ]]; then ok "alle sh-Script-Strings einfach gequotet"
-  else nok "alle sh-Script-Strings einfach gequotet" "$BAD_SH"; fi
-  # ... und kein '${' in einem einfach gequoteten sh-String
-  INTERP="$(grep -oE "'bash[^']*'" <<<"$CODE" | grep -F '${' || true)"
-  if [[ -z "$INTERP" ]]; then ok "kein \${ in bash-Aufrufstrings"
-  else nok "kein \${ in bash-Aufrufstrings" "$INTERP"; fi
+  # 7) Injection-Disziplin (C-2): jeder sh-Script-String ist einfach gequotet.
+  #    Die alte Pruefung verlangte "sh" und ein doppeltes Quote in DERSELBEN
+  #    Zeile. Eine mehrzeilige Aufrufform
+  #      archive = sh(returnStdout: true,
+  #                   script: "bash \"$CI_LIB_DIR/x.sh\" ${pkg}").trim()
+  #    blieb dadurch unentdeckt gruen, obwohl script: hier ein doppelt
+  #    gequoteter, interpolierter String ist - exakt die Command-Injection,
+  #    gegen die die ganze Disziplin gebaut ist. Deshalb getrennt (und ohne
+  #    Bindung an dieselbe Zeile) pruefen: "script:" gefolgt von einem
+  #    doppelten Quote, und ein blanker "sh <ws> "...""-Aufruf.
+  BAD_SCRIPT="$(grep -nE 'script:[[:space:]]*"' <<<"$CODE" || true)"
+  BAD_BARE="$(grep -nE '(^|[^A-Za-z_])sh[[:space:]]+"' <<<"$CODE" || true)"
+  if [[ -z "$BAD_SCRIPT" && -z "$BAD_BARE" ]]; then ok "alle sh-Script-Strings einfach gequotet"
+  else nok "alle sh-Script-Strings einfach gequotet" "$BAD_SCRIPT
+$BAD_BARE"; fi
 
-  # 8) meta(): Whitelist vorhanden
-  assert_contains "meta() prueft field gegen ['name', 'version']" "$CODE" "['name', 'version']"
+  # ... und kein '${' in einem einfach gequoteten sh-Aufrufstring - nicht nur
+  # in Strings, die mit 'bash' beginnen (das war eine Luecke: ein anderer
+  # Skriptname waere durchgerutscht), sondern in JEDEM script:-Wert und jedem
+  # blanken sh '...'-Aufruf.
+  SCRIPT_SQ="$(grep -oE "script:[[:space:]]*'[^']*'" <<<"$CODE")"
+  BARE_SH_SQ="$(grep -oE "(^|[^A-Za-z_])sh[[:space:]]+'[^']*'" <<<"$CODE")"
+  INTERP="$(printf '%s\n%s\n' "$SCRIPT_SQ" "$BARE_SH_SQ" | grep -F '${' || true)"
+  if [[ -z "$INTERP" ]]; then ok "kein \${ in sh-Aufrufstrings"
+  else nok "kein \${ in sh-Aufrufstrings" "$INTERP"; fi
+
+  # 8) meta(): Whitelist-Pruefung exakt im Rumpf von meta() (I-2) - nicht nur
+  #    als Text irgendwo in der Datei. "if (false && !(field in [...]))"
+  #    enthaelt denselben Text, waere aber eine abgeschaltete Pruefung und
+  #    muss deshalb rot sein.
+  META_BODY="$(step_body 'String meta(String archive, String field)')"
+  assert_contains "meta() prueft field exakt gegen die Whitelist" "$META_BODY" \
+    "if (!(field in ['name', 'version'])) {"
 
   # 9) Klammern ausgeglichen (Kommentare ausgenommen)
   OPEN="$(tr -cd '{' <<<"$CODE" | wc -c | tr -d ' ')"; CLOSE="$(tr -cd '}' <<<"$CODE" | wc -c | tr -d ' ')"
   assert_eq "geschweifte Klammern ausgeglichen (Kommentare ausgenommen)" "$OPEN" "$CLOSE"
+
+  # 10) call() (C-1): der Rumpf der Vollpipeline war von keinem der obigen
+  #     Tests geschuetzt - "Methode existiert" (Test 5) prueft nur die
+  #     Signaturzeile. Struktur, Parameter, Log-Zeilen und der post-Block
+  #     einzeln pinnen.
+  CALL_BODY="$(step_body 'def call(Closure body)')"
+  for NEEDLE in "stage('Setup')" \
+                "stage('Pack & Publish')" \
+                "when { expression { env.CHANGED?.trim() } }" \
+                "archiveArtifacts artifacts: 'dist/*.tar.gz'" \
+                "booleanParam(name: 'BUILD_ALL'" \
+                "booleanParam(name: 'SKIP_UPLOAD'" \
+                "if (params.SKIP_UPLOAD) {" \
+                'echo "Basis   :' \
+                'echo "Pakete  :' \
+                "env.CHANGED = pkgs.join('\n')" \
+                "post {" \
+                "cleanup {"; do
+    assert_contains "call(): enthaelt [$NEEDLE]" "$CALL_BODY" "$NEEDLE"
+  done
+
+  # Verschachtelungstiefe an zwei Ankerpunkten statt einer reinen Klammerzahl:
+  # eine verschobene schliessende Klammer aendert die Gesamtzahl nicht, wohl
+  # aber die Tiefe, auf der die zweite Stage relativ zur ersten liegt.
+  DEPTHS="$(awk '
+    { line = $0
+      if (line ~ /stage\(.Setup.\)/)         print "SETUP", depth
+      if (line ~ /stage\(.Pack & Publish.\)/) print "PACK", depth
+      o = gsub(/\{/, "{", line)
+      c = gsub(/\}/, "}", line)
+      depth += o - c
+    }
+  ' <<<"$CALL_BODY")"
+  SETUP_DEPTH="$(awk '$1=="SETUP"{print $2}' <<<"$DEPTHS")"
+  PACK_DEPTH="$(awk '$1=="PACK"{print $2}' <<<"$DEPTHS")"
+  assert_eq "stage('Setup') und stage('Pack & Publish') auf gleicher Verschachtelungstiefe" \
+    "$SETUP_DEPTH" "$PACK_DEPTH"
+
+  # 11) Step-Vertrag (I-1): requireInstalled() und die Delegation von
+  #     changedPackages(base) an changedPackages(base, packages) duerfen
+  #     nicht unbemerkt aus einem Step verschwinden koennen.
+  CP1_BODY="$(step_body 'List changedPackages(String base)')"
+  CP2_BODY="$(step_body 'List changedPackages(String base, String packages)')"
+  BUILD_BODY="$(step_body 'String buildSdist(String pkg)')"
+  PUBLISH_BODY="$(step_body 'void publish(Map args)')"
+  INSTALL_BODY="$(step_body 'String install()')"
+  assert_contains "changedPackages(base, packages) prueft requireInstalled()" "$CP2_BODY" 'requireInstalled()'
+  assert_contains "buildSdist() prueft requireInstalled()" "$BUILD_BODY" 'requireInstalled()'
+  assert_contains "meta() prueft requireInstalled()" "$META_BODY" 'requireInstalled()'
+  assert_contains "publish() prueft requireInstalled()" "$PUBLISH_BODY" 'requireInstalled()'
+  assert_contains "changedPackages(base) delegiert an changedPackages(base, packages)" "$CP1_BODY" "changedPackages(base, '')"
+  assert_contains "install() nutzt libDir()" "$INSTALL_BODY" 'libDir()'
+
+  # 12) GDK-Iteratoren (I-3): .each/.collect/.findAll/.collectEntries duerfen
+  #     nur an den zwei bekannten, unproblematischen Stellen stehen - jede
+  #     weitere ist ein Rueckbau der for-Schleifen-Disziplin, unbemerkt durch
+  #     die anderen Tests, die auf sh-Aufrufstellen und Signaturen zielen.
+  GDK_CALLS="$(grep -nE '\.(each|collect|findAll|collectEntries)[[:space:]]*\{' <<<"$CODE" || true)"
+  # Erlaubt: "pkgs.collectEntries { pkg ->" - der GDK-Iterator, den 'parallel'
+  # als Map von Branch-Namen auf Closures erwartet; eine for-Schleife baut
+  # keine Map und kann hier nicht einspringen. Und
+  # "versions.sort().collect { k, v -> v }" - reines Groovy auf einer bereits
+  # im Speicher stehenden Map, ruft keinen einzigen Step auf und ist fuer
+  # CPS/GDK unproblematisch, vom Grep-Muster mangels Kontext aber nicht von
+  # einem echten Verstoss zu unterscheiden - deshalb hier bewusst mit-erlaubt.
+  GDK_BAD="$(grep -vE "collectEntries \{ pkg ->|\.collect \{ k, v -> v \}" <<<"$GDK_CALLS" \
+             | grep -v '^[[:space:]]*$' || true)"
+  if [[ -z "$GDK_BAD" ]]; then ok "keine GDK-Iteratoren ausser den zwei erlaubten (I-3)"
+  else nok "keine GDK-Iteratoren ausser den zwei erlaubten (I-3)" "$GDK_BAD"; fi
+
+  unset -f step_body
 
   if command -v groovyc >/dev/null 2>&1; then
     if groovyc -d "$TMP/groovyc" "$GROOVY" 2>"$TMP/groovyc.err"; then ok "groovyc kompiliert"

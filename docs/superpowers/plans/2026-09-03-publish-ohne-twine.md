@@ -516,3 +516,64 @@ Beim ersten echten Lauf gegen ein Test-Repo in dieser Reihenfolge pruefen:
 3. Mit falschem Passwort -> erwartet Exit 1 mit der Zugangsdaten-Meldung.
 4. Mit einem Group-Repo in `NEXUS_PYPI_HOSTED` -> erwartet Exit 3 aus dem
    Repo-Typ-Check, noch vor dem Upload.
+
+---
+
+## Nachtrag 2026-09-03: Ergebnis der Ausfuehrung
+
+Beide Tasks umgesetzt, je Task Review und Fix-Runden; Abschluss-Review ueber den
+gesamten Bereich (0 Critical, 3 Important, 14 Minor, "With fixes"), eine
+Fix-Welle und ein scoped Re-Review, beide sauber. Testtreiber am Ende:
+PASS 220 FAIL 0 SKIP 3 (vorher 169).
+
+Ueber den Plan hinaus entschieden und umgesetzt:
+
+* **curl-Fehler enden mit Exit 1**, nicht mit curls rohem Exit-Code. Die Spec
+  hatte sich hier selbst widersprochen: sie schrieb das Durchreichen vor und
+  reservierte gleichzeitig 2 und 3 fuer "Version existiert" und "falscher
+  Repo-Typ". Reproduziert: ein Leerzeichen in `NEXUS_URL` liefert curl-Exit 3
+  und waere von einem Aufrufer als falscher Repo-Typ gelesen worden. Curls Code
+  steht jetzt in der Meldung.
+* **Ein Zeilenumbruch in `NEXUS_USER`/`NEXUS_PASS` wird vorab abgelehnt.** Das
+  curl-Config-Format kann ihn nicht darstellen; curl zitiert sonst die zweite
+  Zeile woertlich auf stderr, und Jenkins maskiert nur das vollstaendige Secret,
+  nicht das Fragment. Ende-zu-Ende belegt.
+* **`--form "pypi.asset=@\"${ARCHIVE}\""`** mit Quotes: curl deutet `;` und `,`
+  im `-F`-Wert als Trennzeichen. Ueber `buildSdist` nicht erreichbar, ueber
+  `pyMonorepo.publish(archive: ...)` und den direkten Aufruf schon.
+* **`check_repo_type` ist erstmals getestet** (group / proxy / hosted mit
+  falschem Format / hosted-pypi), inklusive der Zusage, dass auch dieser
+  curl-Aufruf die Zugangsdaten nicht in argv legt.
+* Der `trap` steht direkt nach dem ersten `mktemp`.
+
+### Bewusst zurueckgestellt — nach dem Merge
+
+* `RC=$?` nach `cfg_credentials | curl ...` ist unter `pipefail` der Status der
+  Pipeline, nicht der von curl. Praktisch schwer ausloesbar.
+* Der curl-Stub liest stdin per `cat` ohne Timeout — ein kuenftiger curl-Aufruf
+  ohne stdin-Pipe liesse die Suite haengen statt rot zu werden.
+* `assert_contains "POST wird verwendet"` prueft einen Substring im gesamten
+  argv-Dump.
+* `printf '%s\n' "$BODY" >&2` gibt bei leerem Body eine Leerzeile aus.
+* Der README-Satz, Nexus vergebe den Ablagepfad `/repository/<repo>/packages/...`
+  aus der PKG-INFO, ist eine Behauptung ueber fremdes Serververhalten und ohne
+  Einschraenkung formuliert.
+* Der Abschnitt "Doppelte Versionen" zaehlt die Exit-1-Faelle nicht vollstaendig
+  auf.
+
+### Erster echter Lauf gegen ein Nexus — Pruefreihenfolge
+
+1. Upload einer neuen Version -> erwartet HTTP 204 (201 wird mit akzeptiert) und
+   `OK: <datei>`. Liefert Nexus einen anderen Erfolgsstatus, landet das im
+   `*`-Zweig und wird mit Status und Body ausgegeben — sichtbar, nicht still.
+2. Denselben Upload wiederholen -> erwartet Exit 2. Trifft der 400-Body weder
+   `already exists` noch `does not allow updating`, landet der Fall im
+   generischen 400-Zweig; dann den tatsaechlichen Wortlaut ins Muster aufnehmen.
+3. Falsches Passwort -> Exit 1 mit der Zugangsdaten-Meldung (401 oder 403).
+4. Ein Group-Repo in `NEXUS_PYPI_HOSTED` -> Exit 3 aus dem Repo-Typ-Check, noch
+   vor dem Upload.
+5. Pruefen, dass die Nexus-Version die Components-API fuer PyPI-Repos anbietet:
+   ein 404 auf `/service/rest/v1/components` waere das Symptom. Fallback waere
+   der Legacy-Weg (`:action=file_upload` gegen `/repository/<repo>/`), der aber
+   Name, Version, filetype, pyversion und metadata_version als eigene
+   Formularfelder braucht.

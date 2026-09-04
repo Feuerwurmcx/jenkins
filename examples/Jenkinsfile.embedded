@@ -1,0 +1,45 @@
+// Vorlage: Integration in eine BESTEHENDE Declarative Pipeline. Die Pipeline
+// behaelt ihre Stages, ihre Parameter und ihren post-Block; eine Stage ruft
+// pyMonorepo.build(...). Als 'Jenkinsfile' in die Wurzel des Monorepos.
+@Library('ci-shared@v1.0.0') _
+
+pipeline {
+    agent any
+
+    options { timestamps() }
+
+    parameters {
+        // Optional: wenn vorhanden, liest build() sie automatisch. Sonst
+        // buildAll:/skipUpload: als Argument uebergeben.
+        booleanParam(name: 'BUILD_ALL',   defaultValue: false, description: 'Alle Pakete bauen')
+        booleanParam(name: 'SKIP_UPLOAD', defaultValue: false, description: 'Nur bauen, kein Upload')
+    }
+
+    stages {
+        stage('Lint') {
+            steps { sh 'echo "eigene Lint-Stage der bestehenden Pipeline"' }
+        }
+        stage('Test') {
+            steps { sh 'echo "eigene Test-Stage der bestehenden Pipeline"' }
+        }
+        stage('Pakete') {
+            steps {
+                script {
+                    // Ermittelt geaenderte Pakete, baut je eine sdist, laedt hoch.
+                    // Archiviert dist/*.tar.gz und raeumt dist/ + .ci-lib/ selbst auf.
+                    def versions = pyMonorepo.build(
+                        nexusUrl  : 'https://nexus.example.com',
+                        hostedRepo: 'pypi-hosted',
+                        // credentialsId: 'nexus-pypi-deploy',   // Default
+                        // packages     : 'alpha beta',          // Default: Auto-Erkennung
+                    )
+                    echo "veroeffentlicht: ${versions}"
+                }
+            }
+        }
+    }
+
+    post {
+        always { echo 'eigener post-Block der bestehenden Pipeline' }
+    }
+}

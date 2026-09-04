@@ -1,0 +1,39 @@
+// Vorlage: Einzel-Steps fuer Pipelines, die vom Standardablauf abweichen -
+// hier: sequentiell statt parallel, Upload nur auf main, Aufraeumen im post.
+@Library('ci-shared@v1.0.0') _
+
+pipeline {
+    agent any
+
+    stages {
+        stage('Pakete bauen') {
+            steps {
+                script {
+                    pyMonorepo.install()
+                    String base = env.GIT_PREVIOUS_SUCCESSFUL_COMMIT ?: ''
+                    List pkgs = pyMonorepo.changedPackages(base)
+                    echo "Pakete: ${pkgs}"
+                    for (String pkg : pkgs) {
+                        String archive = pyMonorepo.buildSdist(pkg)
+                        String version = pyMonorepo.meta(archive, 'version')
+                        echo "${pkg}: ${version} -> ${archive}"
+                        if (env.BRANCH_NAME == 'main') {
+                            pyMonorepo.publish(archive: archive,
+                                               nexusUrl: 'https://nexus.example.com',
+                                               hostedRepo: 'pypi-hosted')
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: 'dist/*.tar.gz', allowEmptyArchive: true, fingerprint: true
+        }
+        cleanup {
+            script { pyMonorepo.cleanup() }
+        }
+    }
+}

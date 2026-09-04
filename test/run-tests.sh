@@ -748,6 +748,26 @@ else
   nok "vars/pyMonorepo.groovy vorhanden" "Datei fehlt"
 fi
 echo
+echo "=== examples ==="
+for EX in "${ROOT}/examples/Jenkinsfile.embedded" "${ROOT}/examples/Jenkinsfile.steps"; do
+  if [[ -f "$EX" ]]; then
+    ok "$(basename "$EX") vorhanden"
+    if grep -qE "pipeline[[:space:]]*\{" "$EX"; then ok "$(basename "$EX") ist eine eigene pipeline{}"
+    else nok "$(basename "$EX") ist eine eigene pipeline{}" "kein pipeline{} gefunden"; fi
+    USED="$(grep -oE 'pyMonorepo\.[A-Za-z]+' "$EX" | sed 's/pyMonorepo\.//' | sort -u)"
+    for M in $USED; do
+      if grep -qE "^[A-Za-z<>, ]+ ${M}\(" "${ROOT}/vars/pyMonorepo.groovy"; then
+        ok "$(basename "$EX") nutzt vorhandene Methode $M"
+      else
+        nok "$(basename "$EX") nutzt vorhandene Methode $M" "keine Definition '${M}(' in vars/pyMonorepo.groovy"
+      fi
+    done
+  else
+    nok "$(basename "$EX") vorhanden" "Datei fehlt"
+  fi
+done
+
+echo
 echo "=== Bilanz ==="
 printf 'PASS %d  FAIL %d  SKIP %d\n' "$PASS" "$FAIL" "$SKIP"
 [[ $FAIL -eq 0 ]]

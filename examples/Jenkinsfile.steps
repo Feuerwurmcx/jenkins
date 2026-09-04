@@ -1,5 +1,13 @@
 // Vorlage: Einzel-Steps fuer Pipelines, die vom Standardablauf abweichen -
 // hier: sequentiell statt parallel, Upload nur auf main, Aufraeumen im post.
+//
+// Das Beispiel nutzt env.BRANCH_NAME (Upload nur auf main) und
+// env.GIT_PREVIOUS_SUCCESSFUL_COMMIT (Diff-Basis). Beide sind nur in
+// Multibranch-Pipeline- und "Pipeline from SCM"-Jobs gesetzt; in einem
+// normalen Pipeline-Job sind sie null, die Bedingung greift dann nie
+// bzw. es wird jedes Mal alles gebaut. In einem normalen Pipeline-Job
+// muss man env.BRANCH_NAME durch eine eigene Bedingung ersetzen (z.B.
+// einen Parameter), sonst wird nie hochgeladen.
 @Library('ci-shared@v1.0.0') _
 
 pipeline {
@@ -17,6 +25,8 @@ pipeline {
                         String archive = pyMonorepo.buildSdist(pkg)
                         String version = pyMonorepo.meta(archive, 'version')
                         echo "${pkg}: ${version} -> ${archive}"
+                        // env.BRANCH_NAME ist null ausserhalb von Multibranch-/
+                        // Pipeline-from-SCM-Jobs - Upload faellt dann still aus.
                         if (env.BRANCH_NAME == 'main') {
                             pyMonorepo.publish(archive: archive,
                                                nexusUrl: 'https://nexus.example.com',

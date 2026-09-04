@@ -104,7 +104,7 @@ Vollstaendiges Beispiel: `examples/Jenkinsfile.embedded`.
 | `packages` | nein | `''` | feste Paketliste; leer = Auto-Erkennung |
 | `buildAll` | nein | `params.BUILD_ALL`, sonst `false` | alles bauen |
 | `skipUpload` | nein | `params.SKIP_UPLOAD`, sonst `false` | Dry-Run |
-| `base` | nein | berechnet | Diff-Basis (`GIT_PREVIOUS_SUCCESSFUL_COMMIT`, sonst `HEAD~1`) |
+| `base` | nein | berechnet, bei `buildAll: true` immer `''` | Diff-Basis (`GIT_PREVIOUS_SUCCESSFUL_COMMIT`, sonst `HEAD~1`); `''` = alles bauen |
 | `archive` | nein | `true` | `dist/*.tar.gz` am Ende archivieren |
 | `cleanup` | nein | `true` | `dist/` und `.ci-lib/` am Ende entfernen |
 
@@ -119,9 +119,11 @@ zaehlt ein `string`-Parameter einer fremden Pipeline mit dem Wert `'false'`
 nicht faelschlich als wahr (Groovy-Truthiness wuerde jeden nicht-leeren
 String als `true` werten).
 
-`build()` ueberschreibt `currentBuild.description` (erst die Paketliste,
-danach die Versionsliste). Eine einbettende Pipeline, die die Beschreibung
-selbst setzt, sollte das danach tun.
+`build()` ueberschreibt `currentBuild.description`: bei leerer Paketliste
+einmalig auf `'keine Paketänderungen'`, sonst zuerst auf die Paketliste
+(`"<n> Paket(e): ..."`) und am Ende auf die Versionsliste. Eine
+einbettende Pipeline, die die Beschreibung selbst setzt, sollte das
+danach tun.
 
 `archive`/`cleanup` laufen im `finally` des Steps: ein Abort
 (`FlowInterruptedException`, eine Unterklasse von `InterruptedException`)
@@ -155,6 +157,11 @@ klarer Meldung ab, wenn `install()` nicht vorher aufgerufen wurde.
 `cleanup()` ist die Ausnahme: es ist idempotent und raeumt auch auf, wenn
 `install()` nie lief. Alle Steps funktionieren in Declarative (`script {}`)
 und Scripted Pipelines. Vollstaendiges Beispiel: `examples/Jenkinsfile.steps`.
+Das Beispiel nutzt `env.BRANCH_NAME` (Upload nur auf main) und
+`env.GIT_PREVIOUS_SUCCESSFUL_COMMIT` (Diff-Basis); beide sind nur in
+Multibranch-Pipeline- und "Pipeline from SCM"-Jobs gesetzt, in einem
+normalen Pipeline-Job muss man sie durch eine eigene Bedingung ersetzen,
+sonst wird nie hochgeladen.
 
 Auch hier gehoert `.ci-lib/` in die `.gitignore` des Monorepos.
 

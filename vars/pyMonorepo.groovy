@@ -80,6 +80,7 @@ def call(Closure body) {
                         // im post-Block unten.
                         this.build(nexusUrl: cfg.nexusUrl, hostedRepo: cfg.hostedRepo,
                                    credentialsId: cfg.credentialsId, packages: cfg.packages,
+                                   buildAll: params.BUILD_ALL, skipUpload: params.SKIP_UPLOAD,
                                    archive: false, cleanup: false)
                     }
                 }
@@ -298,10 +299,17 @@ void publish(Map args) {
     }
 }
 
-// Entfernt dist/ und das Skriptverzeichnis. Idempotent; laeuft auch, wenn
-// install() nie aufgerufen wurde.
+// Entfernt die selbst erzeugten sdists und das Skriptverzeichnis. Idempotent;
+// laeuft auch, wenn install() nie aufgerufen wurde.
+//
+// Bewusst NICHT 'rm -rf dist': eingebettet gehoert der Workspace dem
+// Aufrufer, und 'dist/' ist einer der verbreitetsten Ausgabeordner ueberhaupt
+// (webpack, rollup, vite, python -m build, Gradle 'distribution'). Eine
+// fremde Pipeline, die selbst nach dist/ baut, wuerde ihr eigenes Artefakt
+// verlieren (I-1). Stattdessen nur die eigenen *.tar.gz entfernen und
+// dist/ nur wegraeumen, wenn dadurch nichts mehr darin liegt.
 void cleanup() {
-    sh 'rm -rf dist'
+    sh 'rm -f dist/*.tar.gz; rmdir dist 2>/dev/null || true'
     if (env.CI_LIB_DIR) {
         sh 'rm -rf "$CI_LIB_DIR"'
     }
@@ -329,23 +337,20 @@ private void requireInstalled() {
     }
 }
 
-// params existiert nur, wenn die Pipeline Parameter definiert (und in manchen
-// Kontexten gar nicht) - und ist in Jenkins-CPS eine GlobalVariable, kein
-// Eintrag im Binding: binding.hasVariable('params') sieht sie deshalb NICHT
-// (liefert immer false), erst der Property-Zugriff (ueber
-// CpsScript.getProperty()s MissingPropertyException-Fallback) loest sie auf.
-// Deshalb zwei Stufen: zuerst binding.hasVariable() pruefen (deckt ab, falls
-// 'params' dort doch einmal steht), sonst per try/catch den Property-Zugriff
-// versuchen - schlaegt der fehl (keine Pipeline-Parameter definiert), gibt es
-// den Default. Ohne diese Absicherung wuerde ein eingebetteter Aufruf in
-// einer Pipeline ohne parameters{} mit MissingPropertyException sterben.
+// params ist in Jenkins-CPS eine GlobalVariable, kein Eintrag im Script-
+// Binding - der Zugriff loest sie erst ueber den Property-Zugriff auf (ueber
+// CpsScript.getProperty()s MissingPropertyException-Fallback). Deshalb per
+// try/catch: schlaegt der Zugriff fehl (keine parameters{} in der Pipeline
+// definiert), gibt es den Default. Script.getBinding() ist im Sandbox NICHT
+// freigegeben und war hier ohnehin wirkungslos (params steht nie im
+// Script-Binding) - der fruehere Zweig ueber dessen hasVariable('params')
+// zwang die Library allein deshalb zu einer trusted Installation, ohne
+// Funktionsgewinn (I-2). Ohne diese Absicherung wuerde ein eingebetteter
+// Aufruf in einer Pipeline ohne parameters{} mit MissingPropertyException
+// sterben.
 private boolean paramOr(String name, boolean dflt) {
     def p = null
-    if (binding.hasVariable('params')) {
-        p = binding.getVariable('params')
-    } else {
-        try { p = params } catch (Exception ignored) { return dflt }
-    }
+    try { p = params } catch (Exception ignored) { return dflt }
     if (!(p instanceof Map) || !p.containsKey(name)) { return dflt }
     return toBool(p[name], dflt)
 }

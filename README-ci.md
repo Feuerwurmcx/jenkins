@@ -31,7 +31,9 @@ laeuft:
 * `tar` (`build-sdist.sh`, `sdist-meta.sh`)
 * `curl` (`publish-pypi.sh`, Repo-Typ-Check und Upload gegen die Nexus-REST-API)
 * `python3` mit `build` (`python3 -m pip install --user build`) oder ersatzweise
-  `setuptools` (`build-sdist.sh` faellt sonst auf `setup.py sdist` zurueck)
+  `setuptools` (`build-sdist.sh` faellt sonst auf `setup.py sdist` zurueck);
+  `publish-pypi.sh` braucht ausserdem nacktes `python3` (Stdlib genuegt) fuer
+  den Repo-Typ-Check
 
 Ausdruecklich **nicht** noetig ist `twine`: der Upload laeuft per `curl` gegen
 die Nexus-REST-Components-API.

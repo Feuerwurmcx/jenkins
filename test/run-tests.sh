@@ -647,6 +647,8 @@ $BAD_BARE"; fi
                 "String credentialsId = args.credentialsId ?: 'nexus-pypi-deploy'" \
                 "nexusUrl: args.nexusUrl" \
                 "archiveArtifacts artifacts: 'dist/*.tar.gz', allowEmptyArchive: true, fingerprint: true" \
+                "catch (InterruptedException abort)" \
+                "throw abort" \
                 "catch (Exception e)"; do
     assert_contains "build(): enthaelt [$NEEDLE]" "$BUILD_MAP_BODY" "$NEEDLE"
   done
@@ -660,6 +662,23 @@ $BAD_BARE"; fi
     ok "build(): archiveArtifacts steht im finally vor cleanup()"
   else nok "build(): archiveArtifacts steht im finally vor cleanup()" \
     "archiveArtifacts=Zeile [$ARCHIVE_LINE], cleanup()=Zeile [$CLEANUP_CALL_LINE]"; fi
+
+  # Fix-Runde 2 / Befund 1: FlowInterruptedException (Abort/Timeout) erbt von
+  # InterruptedException und damit von Exception - ohne einen spezifischen,
+  # weiterwerfenden catch davor wuerde ein Abbruch waehrend Archivieren/
+  # Aufraeumen von "catch (Exception e)" verschluckt statt propagiert. Pin:
+  # der InterruptedException-Catch steht VOR dem allgemeinen Exception-Catch
+  # und wirft weiter (throw abort).
+  INTERRUPTED_CATCH_LINE="$(grep -n 'catch (InterruptedException abort)' <<<"$BUILD_MAP_BODY" | head -1 | cut -d: -f1)"
+  GENERAL_CATCH_LINE="$(grep -n 'catch (Exception e)' <<<"$BUILD_MAP_BODY" | head -1 | cut -d: -f1)"
+  if [[ -n "$INTERRUPTED_CATCH_LINE" && -n "$GENERAL_CATCH_LINE" && "$INTERRUPTED_CATCH_LINE" -lt "$GENERAL_CATCH_LINE" ]]; then
+    ok "build(): catch (InterruptedException abort) steht vor catch (Exception e)"
+  else nok "build(): catch (InterruptedException abort) steht vor catch (Exception e)" \
+    "InterruptedException=Zeile [$INTERRUPTED_CATCH_LINE], Exception=Zeile [$GENERAL_CATCH_LINE]"; fi
+  # "throw abort" selbst ist bereits ueber den NEEDLE-Loop oben (Zeile
+  # "catch (InterruptedException abort)"/"throw abort") gegen BUILD_MAP_BODY
+  # gepinnt - Gegenprobe (c) macht diesen Needle-Check rot, wenn "throw
+  # abort" durch z.B. "echo 'abort'" ersetzt wird.
 
   # 10c) params-Zugriff abgesichert (paramOr()): binding.hasVariable('params')
   #      sieht 'params' in Jenkins-CPS nicht (GlobalVariable, kein Binding-

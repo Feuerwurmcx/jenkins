@@ -192,6 +192,10 @@ Map build(Map args) {
             if (doCleanup) {
                 cleanup()
             }
+        } catch (InterruptedException abort) {
+            // Abort/Timeout (FlowInterruptedException erbt von InterruptedException)
+            // darf hier nicht verschluckt werden - weiterwerfen.
+            throw abort
         } catch (Exception e) {
             echo "pyMonorepo.build: Aufraeumen fehlgeschlagen: ${e}"
         }
@@ -349,8 +353,11 @@ private boolean paramOr(String name, boolean dflt) {
 // 'false' as boolean waere true (Groovy-Truthiness: ein nicht-leerer String
 // ist wahr) - betrifft jeden Boolean-Parameter, der als String hereinkommt
 // (z.B. string(name: 'SKIP_UPLOAD', defaultValue: 'false') in der
-// einbettenden Pipeline). Strings werden deshalb geparst, Booleans
-// durchgereicht, alles andere faellt auf den Default zurueck (I-1/I-2).
+// einbettenden Pipeline). Nur v == null faellt auf den Default zurueck;
+// Booleans werden direkt durchgereicht, alles andere (Strings, Zahlen,
+// GStrings, ...) laeuft ueber toString().trim().equalsIgnoreCase('true') -
+// und ist damit fast immer false, sofern es nicht literal 'true' ergibt
+// (I-1/I-2).
 private boolean toBool(Object v, boolean dflt) {
     if (v == null) { return dflt }
     if (v instanceof Boolean) { return (Boolean) v }

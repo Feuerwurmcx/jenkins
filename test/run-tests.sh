@@ -185,8 +185,10 @@ cat >> "${STUB_DIR}/curl-stdin"
 # Repo-Typ-Check nicht.
 out=""
 prev=""
+write_out=0
 for a in "$@"; do
   if [[ "$prev" == "--output" ]]; then out="$a"; fi
+  if [[ "$a" == "--write-out" ]]; then write_out=1; fi
   prev="$a"
 done
 
@@ -197,7 +199,11 @@ if [[ -z "$out" ]]; then
 fi
 
 printf '%s' "${STUB_BODY:-}" > "$out"
-printf '%s' "${STUB_HTTP:-204}"
+# Den Status nur drucken, wenn das Skript ihn wirklich per --write-out abholt -
+# sonst bliebe ein versehentlich gestrichenes --write-out unbemerkt gruen.
+if [[ "$write_out" == 1 ]]; then
+  printf '%s' "${STUB_HTTP:-204}"
+fi
 exit "${STUB_CURL_RC:-0}"
 STUB
   chmod +x "${d}/curl"
@@ -967,8 +973,12 @@ assert_contains "Upload 204 -> OK-Meldung" "$PUB_OUT" "OK:"
 assert_contains "URL ist die Components-API" "$PUB_ARGS" \
   "https://nexus.example.com/service/rest/v1/components?repository=pypi-hosted"
 assert_contains "Formularfeld pypi.asset zeigt aufs Archiv" "$PUB_ARGS" \
-  "pypi.asset=@${ARCHIVE}"
+  "pypi.asset=@\"${ARCHIVE}\""
 assert_contains "POST wird verwendet" "$PUB_ARGS" "POST"
+# Q-2: der Stub druckt den HTTP-Status nur, wenn --write-out in argv steht -
+# ohne diese Assertion bliebe ein versehentlich gestrichenes --write-out
+# unbemerkt gruen (der *-Zweig sieht dann ein leeres $HTTP).
+assert_contains "Status wird per --write-out geholt" "$PUB_ARGS" '%{http_code}'
 
 run_publish created NEXUS_USER=u NEXUS_PASS=p STUB_HTTP=201
 assert_rc "Upload 201 -> rc 0" 0 "$PUB_RC"
@@ -991,9 +1001,27 @@ run_publish auth NEXUS_USER=u NEXUS_PASS=p STUB_HTTP=401
 assert_rc "401 -> rc 1" 1 "$PUB_RC"
 assert_contains "401 -> Meldung nennt Zugangsdaten" "$PUB_OUT" "Zugangsdaten"
 
+# Q-6: 403 (fehlendes nx-repository-view-*-add-Recht) war bisher ungetestet -
+# das Muster '401|403)' im Skript stand ungepinnt neben dem getesteten '401'.
+run_publish forbidden NEXUS_USER=u NEXUS_PASS=p STUB_HTTP=403
+assert_rc "403 -> rc 1" 1 "$PUB_RC"
+assert_contains "403 -> Meldung nennt Zugangsdaten" "$PUB_OUT" "Zugangsdaten"
+
 run_publish notfound NEXUS_USER=u NEXUS_PASS=p STUB_HTTP=404
 assert_rc "404 -> rc 1" 1 "$PUB_RC"
-assert_contains "404 -> Meldung nennt das Repository" "$PUB_OUT" "pypi-hosted"
+# Q-4: NICHT auf "pypi-hosted" pruefen - das trifft schon die immer gedruckte
+# "Upload -> https://.../components?repository=pypi-hosted"-Zeile (Z. 80),
+# unabhaengig vom 404-Zweig. Ein Teilstring, den nur die 404-Meldung enthaelt.
+assert_contains "404 -> Meldung nennt das Repository" "$PUB_OUT" "existiert nicht unter"
+
+# Q-7: das alte Duplikat-Muster ('400|already exists|...') traf auch auf
+# "400" IM DATEINAMEN zu (z. B. foo-1.400.tar.gz) und meldete faelschlich rc 2.
+# Das aktuelle Muster prueft nur noch auf "already exists"/"does not allow
+# updating" im Body - hier gepinnt, damit eine Rueckkehr zum alten Muster rot
+# wird.
+run_publish notdup NEXUS_USER=u NEXUS_PASS=p STUB_HTTP=400 \
+  STUB_BODY='Malformed component foo-1.400.tar.gz'
+assert_rc "400 mit '.400.' im Dateinamen -> rc 1 (kein falscher Duplikat-Treffer)" 1 "$PUB_RC"
 
 run_publish weird NEXUS_USER=u NEXUS_PASS=p STUB_HTTP=500 STUB_BODY='Internal Server Error'
 assert_rc "500 -> rc 1" 1 "$PUB_RC"
@@ -1017,6 +1045,80 @@ assert_contains "Benutzername steht in der curl-Config" "$PUB_STDIN" "deploy-use
 run_publish escape NEXUS_USER=u 'NEXUS_PASS=pa"ss\wort' STUB_HTTP=204
 assert_contains 'Passwort mit " wird escaped' "$PUB_STDIN" 'pa\"ss'
 assert_contains 'Passwort mit \ wird escaped' "$PUB_STDIN" 'ss\\wort'
+
+# Q-1: ein Zeilenumbruch in Nutzername/Passwort kann die curl-Config (ein Wert
+# pro Zeile) nicht darstellen - curl brach frueher beim Parsen ab und zitierte
+# die zweite Zeile woertlich im Fehlertext, der ins Build-Log ging. Muss VOR
+# jedem curl-Aufruf abgefangen werden: das Fragment "geheimB" darf nirgends
+# in der Ausgabe auftauchen.
+run_publish newline NEXUS_USER=u $'NEXUS_PASS=geheimA\ngeheimB' STUB_HTTP=204
+assert_rc "Passwort mit Zeilenumbruch -> rc 1" 1 "$PUB_RC"
+assert_contains "Passwort mit Zeilenumbruch -> Meldung nennt Zeilenumbruch" "$PUB_OUT" "Zeilenumbruch"
+if grep -q 'geheimB' <<<"$PUB_OUT"; then
+  nok "Passwort mit Zeilenumbruch -> zweite Zeile NICHT in der Ausgabe" "'geheimB' gefunden"
+else ok "Passwort mit Zeilenumbruch -> zweite Zeile NICHT in der Ausgabe"; fi
+
+# Q-3: check_repo_type ist vollstaendig ungetestet, solange jeder run_publish-
+# Aufruf SKIP_REPO_CHECK=1 setzt. run_publish_checked laesst den Repo-Typ-
+# Check laufen (beide curl-Aufrufe landen im selben STUB_DIR).
+run_publish_checked() {
+  local sub="$1"; shift
+  PUB_D="${TMP}/pubchecked-${sub}"
+  rm -rf "$PUB_D"; mkdir -p "$PUB_D"
+  PUB_OUT="$(env "$@" PATH="${CURL_BIN}:${PATH}" STUB_DIR="$PUB_D" \
+             NEXUS_URL=https://nexus.example.com \
+             NEXUS_PYPI_HOSTED=pypi-hosted \
+             bash "$SCRIPTS/publish-pypi.sh" "$ARCHIVE" 2>&1)"
+  PUB_RC=$?
+  PUB_ARGS="$(cat "${PUB_D}/curl-args" 2>/dev/null || true)"
+  PUB_STDIN="$(cat "${PUB_D}/curl-stdin" 2>/dev/null || true)"
+}
+
+run_publish_checked group NEXUS_USER=u NEXUS_PASS=p \
+  STUB_REPOS_JSON='[{"name":"pypi-hosted","type":"group","format":"pypi"}]'
+assert_rc "Repo-Check: GROUP -> rc 3" 3 "$PUB_RC"
+assert_contains "Repo-Check: GROUP -> Meldung nennt GROUP" "$PUB_OUT" "GROUP"
+
+run_publish_checked proxy NEXUS_USER=u NEXUS_PASS=p \
+  STUB_REPOS_JSON='[{"name":"pypi-hosted","type":"proxy","format":"pypi"}]'
+assert_rc "Repo-Check: PROXY -> rc 3" 3 "$PUB_RC"
+
+run_publish_checked wrongformat NEXUS_USER=u NEXUS_PASS=p \
+  STUB_REPOS_JSON='[{"name":"pypi-hosted","type":"hosted","format":"maven2"}]'
+assert_rc "Repo-Check: hosted/maven2 -> rc 3" 3 "$PUB_RC"
+assert_contains "Repo-Check: hosted/maven2 -> Meldung nennt das Format" "$PUB_OUT" "maven2"
+
+run_publish_checked okpypi NEXUS_USER=u NEXUS_PASS=geheim-checked-nicht-in-argv STUB_HTTP=204 \
+  STUB_REPOS_JSON='[{"name":"pypi-hosted","type":"hosted","format":"pypi"}]'
+assert_rc "Repo-Check: hosted/pypi -> rc 0, Upload laeuft" 0 "$PUB_RC"
+assert_contains "Repo-Check: hosted/pypi -> OK-Meldung (Upload lief)" "$PUB_OUT" "OK:"
+# Gilt fuer BEIDE curl-Aufrufe (Repo-Check und Upload) - derselbe Gegentest wie
+# beim reinen Upload, hier aber ueber den kompletten Pfad mit Repo-Check davor.
+if grep -q 'geheim-checked-nicht-in-argv' <<<"$PUB_ARGS"; then
+  nok "Repo-Check: Passwort steht NICHT in argv (beide Aufrufe)" "gefunden in curl-args"
+else ok "Repo-Check: Passwort steht NICHT in argv (beide Aufrufe)"; fi
+
+# Q-8: ';' und ',' sind im -F-Wert von curl Trennzeichen - ein Archivpfad mit
+# ',' fuehrte ohne Anfuehrungszeichen um den Dateinamen zu
+# "curl: (26) Failed to open/read local data" und der irrefuehrenden Meldung
+# "Nexus nicht erreichbar". Betrifft pyMonorepo.publish(archive:...) und den
+# direkten Skriptaufruf, nicht buildSdist (das erzeugt nie ein ','-Archiv).
+COMMA_DIR="${TMP}/comma-archiv"
+mkdir -p "$COMMA_DIR"
+COMMA_ARCHIVE="${COMMA_DIR}/pkg,mit-komma-1.0.tar.gz"
+cp "$ARCHIVE" "$COMMA_ARCHIVE"
+PUB_D="${TMP}/pub-comma"
+rm -rf "$PUB_D"; mkdir -p "$PUB_D"
+PUB_OUT="$(env NEXUS_USER=u NEXUS_PASS=p STUB_HTTP=204 PATH="${CURL_BIN}:${PATH}" \
+           STUB_DIR="$PUB_D" SKIP_REPO_CHECK=1 \
+           NEXUS_URL=https://nexus.example.com \
+           NEXUS_PYPI_HOSTED=pypi-hosted \
+           bash "$SCRIPTS/publish-pypi.sh" "$COMMA_ARCHIVE" 2>&1)"
+PUB_RC=$?
+PUB_ARGS="$(cat "${PUB_D}/curl-args" 2>/dev/null || true)"
+assert_rc "Archivpfad mit ',' -> rc 0" 0 "$PUB_RC"
+assert_contains "Archivpfad mit ',' landet vollstaendig (in Anfuehrungszeichen) in argv" \
+  "$PUB_ARGS" "pypi.asset=@\"${COMMA_ARCHIVE}\""
 
 skip "publish-pypi.sh echter Netzwerk-Upload" "braucht ein erreichbares Nexus - bewusst nicht getestet"
 

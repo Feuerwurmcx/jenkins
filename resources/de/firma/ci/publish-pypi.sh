@@ -24,6 +24,17 @@ ARCHIVE="${1:?archiv fehlt}"
 : "${NEXUS_USER:?NEXUS_USER fehlt}"
 : "${NEXUS_PASS:?NEXUS_PASS fehlt}"
 
+# Ein Zeilenumbruch in Nutzername/Passwort kann die curl-Config (ein Wert pro
+# Zeile) nicht darstellen: curl bricht beim Parsen ab und zitiert die zweite
+# Zeile woertlich im Fehlertext, der als 'cat "$ERR_FILE" >&2' ins Build-Log
+# geht - Jenkins maskiert dort nur das VOLLE Secret, nicht das Fragment. Lieber
+# hier klar abbrechen, bevor ueberhaupt ein curl laeuft.
+case "${NEXUS_USER}${NEXUS_PASS}" in
+  *$'\n'*)
+    echo "FEHLER: NEXUS_USER/NEXUS_PASS enthaelt einen Zeilenumbruch - das curl-Config-Format kann den nicht darstellen" >&2
+    exit 1 ;;
+esac
+
 [[ -f "$ARCHIVE" ]] || { echo "FEHLER: $ARCHIVE nicht gefunden" >&2; exit 1; }
 
 BASE="${NEXUS_URL%/}"
@@ -80,8 +91,8 @@ for r in json.load(sys.stdin):
 echo "Upload -> ${UPLOAD_URL}  ($(basename "$ARCHIVE"))"
 
 BODY_FILE="$(mktemp)"
+trap 'rm -f "$BODY_FILE" "${ERR_FILE:-}"' EXIT
 ERR_FILE="$(mktemp)"
-trap 'rm -f "$BODY_FILE" "$ERR_FILE"' EXIT
 
 # Status per --write-out getrennt vom Body: so steht der Exit-Grund fest, statt
 # aus dem Fließtext der Antwort geraten zu werden.
@@ -90,7 +101,7 @@ HTTP="$(cfg_credentials \
         | curl --config - --silent --show-error \
                --output "$BODY_FILE" --write-out '%{http_code}' \
                --request POST \
-               --form "pypi.asset=@${ARCHIVE}" \
+               --form "pypi.asset=@\"${ARCHIVE}\"" \
                "$UPLOAD_URL" 2>"$ERR_FILE")"
 RC=$?
 set -e

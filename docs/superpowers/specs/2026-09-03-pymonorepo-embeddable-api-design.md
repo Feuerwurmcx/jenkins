@@ -62,8 +62,8 @@ Gemeinsame Regeln:
 | `cleanup()` | `void cleanup()` | `rm -rf dist` und `rm -rf "$CI_LIB_DIR"` (nur wenn gesetzt). Idempotent. |
 
 `meta()` validiert `field` gegen `['name', 'version']` und bricht sonst mit
-`error` ab — der Wert wird nicht per withEnv, sondern als Literal in den
-sh-String gesetzt, deshalb darf er nur aus dieser Whitelist kommen.
+`error` ab. Der Wert geht trotzdem per `withEnv` (`FIELD`) in den Aufruf —
+die Whitelist ist eine zweite Sicherung, keine Alternative zur Disziplin.
 
 ## Composite: `build(Map args)`
 

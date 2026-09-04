@@ -1,18 +1,40 @@
-// Standard-Pipeline fuer ein Python-Monorepo: geaenderte Pakete ermitteln, je
-// eine sdist bauen und in ein Nexus-PyPI-hosted-Repo hochladen.
+// Jenkins Shared Library fuer ein Python-Monorepo: geaenderte Pakete ermitteln,
+// je eine sdist bauen und in ein Nexus-PyPI-hosted-Repo hochladen.
 //
-//   @Library('ci-shared@v1.0.0') _
+// Drei Arten, es zu benutzen:
 //
-//   pyMonorepo {
-//       nexusUrl   = 'https://nexus.example.com'
-//       hostedRepo = 'pypi-hosted'
-//   }
+//   1) Vollpipeline (neues Monorepo, Jenkinsfile enthaelt nur Konfiguration):
+//        @Library('ci-shared@v1.0.0') _
+//        pyMonorepo { nexusUrl = 'https://nexus.example.com'; hostedRepo = 'pypi-hosted' }
 //
-// Die eigentliche Arbeit steckt in den Shell-Skripten unter
-// resources/de/firma/ci/. Sie werden zur Laufzeit auf den Agent
-// geschrieben - ein Monorepo braucht dadurch keinen ci/-Ordner mehr. Der
-// Zuschnitt ist Absicht: was in .sh steckt, ist lokal testbar, was in Groovy
-// steckt, erst auf einem Jenkins.
+//   2) Composite-Step in einer Stage einer BESTEHENDEN Pipeline (Task 2):
+//        script { pyMonorepo.build(nexusUrl: '...', hostedRepo: 'pypi-hosted') }
+//
+//   3) Einzel-Steps, wenn eine Pipeline abweichen muss:
+//        pyMonorepo.install()
+//        def pkgs = pyMonorepo.changedPackages(base)
+//        def a = pyMonorepo.buildSdist(pkg); def v = pyMonorepo.meta(a, 'version')
+//        pyMonorepo.publish(archive: a, nexusUrl: '...')
+//        pyMonorepo.cleanup()
+//
+// Die eigentliche Arbeit steckt in den Shell-Skripten unter resources/de/firma/ci/.
+// Sie werden zur Laufzeit per install() auf den Agent geschrieben - ein Monorepo
+// braucht keinen ci/-Ordner. Was in .sh steckt, ist lokal testbar; was in
+// Groovy steckt, erst auf einem Jenkins. Deshalb bleibt Groovy duenn.
+//
+// Disziplin, die in JEDEM Step gilt: vom Repo kontrollierte Werte (Paketname,
+// Archivpfad, Basis-Commit, Paketliste) gehen per withEnv in die Umgebung, der
+// sh-String ist einfach gequotet und referenziert die Shell-Variable. Nie
+// Groovy-Interpolation in einen sh-String - ein Ordnername wie
+// "x'; echo INJECTED >&2; '" wuerde sonst Kommandos einschleusen.
+//
+// Keine Default-Parameter: Groovy erzeugt daraus eine synthetische Ueberladung,
+// deren CPS-Transformation eine bekannte Fehlerquelle ist. Wo ein Default
+// gewuenscht ist, gibt es zwei explizite Ueberladungen.
+
+// ---------------------------------------------------------------------------
+// Vollpipeline-Wrapper
+// ---------------------------------------------------------------------------
 
 def call(Closure body) {
     Map cfg = [
@@ -51,30 +73,13 @@ def call(Closure body) {
             stage('Setup') {
                 steps {
                     script {
-                        // Ueber env statt ueber eine lokale Variable: der Pfad wird in
-                        // einer spaeteren Stage und im post-Block wieder gebraucht.
-                        env.CI_LIB_DIR = materializeScripts('.ci-lib')
+                        install()
 
                         // Basis fuer den Diff: letzter erfolgreicher Build (Git-Plugin
                         // setzt das), sonst HEAD~1, sonst leer -> alles bauen.
-                        def base = params.BUILD_ALL ? '' :
-                            (env.GIT_PREVIOUS_SUCCESSFUL_COMMIT ?: sh(returnStdout: true, script:
-                                'git rev-parse HEAD~1 2>/dev/null || true').trim())
-
-                        def out
-                        // BASE geht wie PACKAGES per withEnv rein statt per String-
-                        // Interpolation: env.GIT_PREVIOUS_SUCCESSFUL_COMMIT und das
-                        // rev-parse-Ergebnis sind zwar meist ein Commit-Hash, aber
-                        // letztlich Werte von ausserhalb dieses Skripts. Dieselbe
-                        // Ueberlegung wie bei PKG/ARCHIVE unten in der naechsten
-                        // Stage - konsequent auch hier, statt nur dort, wo es zuerst
-                        // auffiel.
-                        withEnv(["PACKAGES=${cfg.packages}", "BASE=${base}"]) {
-                            out = sh(returnStdout: true, script:
-                                'bash "$CI_LIB_DIR/changed-packages.sh" "$BASE"').trim()
-                        }
-                        env.CHANGED = out
-                        def pkgs = out ? out.split('\n') as List : []
+                        String base = params.BUILD_ALL ? '' : defaultBase()
+                        List pkgs = changedPackages(base, cfg.packages)
+                        env.CHANGED = pkgs.join('\n')
 
                         echo "Basis   : ${base ?: '(keine – alles)'}"
                         echo "Pakete  : ${pkgs.join(', ') ?: '(keine Änderungen)'}"
@@ -93,67 +98,24 @@ def call(Closure body) {
                 when { expression { env.CHANGED?.trim() } }
                 steps {
                     script {
-                        def pkgs = env.CHANGED.trim().split('\n') as List
-                        def versions = [:]   // CPS-Branches laufen kooperativ, kein Sync noetig
+                        List pkgs = env.CHANGED.trim().split('\n') as List
+                        Map versions = [:]   // CPS-Branches laufen kooperativ, kein Sync noetig
 
                         parallel pkgs.collectEntries { pkg ->
                             [ (pkg): {
                                 stage(pkg) {
-                                    def archive, version, distName
-
-                                    // pkg ist ein Top-Level-Ordnername aus dem Monorepo -
-                                    // von jedem Branch kontrollierbar, also nicht
-                                    // vertrauenswuerdig. Deshalb NIE in den sh-String
-                                    // interpolieren ('.../build-sdist.sh ${pkg}'), sondern
-                                    // per withEnv als Shell-Variable durchreichen und im
-                                    // Skript in doppelten Anfuehrungszeichen referenzieren
-                                    // ("$PKG"). Sonst kann ein Ordnername wie
-                                    // "x'; echo INJECTED >&2; '" einen zusaetzlichen
-                                    // Shell-Befehl einschleusen. Exakt dieselbe Ueberlegung,
-                                    // aus der das Nexus-Secret weiter unten schon heute nicht
-                                    // interpoliert wird.
-                                    withEnv(["PKG=${pkg}"]) {
-                                        // build-sdist.sh liefert den vom Build erzeugten
-                                        // Dateinamen zurueck - der wird NICHT selbst
-                                        // zusammengebaut, weil setuptools Name und Version
-                                        // normalisiert.
-                                        archive = sh(returnStdout: true,
-                                            script: 'bash "$CI_LIB_DIR/build-sdist.sh" "$PKG"').trim()
-                                    }
-
-                                    // archive kommt aus dem Dateinamen, den build-sdist.sh
-                                    // erzeugt hat - letztlich also wieder aus pkg. Gleiche
-                                    // Begruendung, gleicher Umweg ueber die Umgebung.
-                                    withEnv(["ARCHIVE=${archive}"]) {
-                                        // Aus PKG-INFO statt aus dem Dateinamen: Paketnamen
-                                        // duerfen selbst Bindestriche enthalten.
-                                        version = sh(returnStdout: true,
-                                            script: 'bash "$CI_LIB_DIR/sdist-meta.sh" "$ARCHIVE" version').trim()
-                                        distName = sh(returnStdout: true,
-                                            script: 'bash "$CI_LIB_DIR/sdist-meta.sh" "$ARCHIVE" name').trim()
-                                    }
+                                    String archive  = buildSdist(pkg)
+                                    String distName = meta(archive, 'name')
+                                    String version  = meta(archive, 'version')
                                     echo "${pkg}: ${distName} ${version}"
 
                                     if (params.SKIP_UPLOAD) {
                                         echo "SKIP_UPLOAD gesetzt – ${archive} nicht hochgeladen"
                                     } else {
-                                        // Nexus-Werte und ARCHIVE nur um den Upload herum,
-                                        // nicht global: dieselbe Ueberlegung wie beim Secret
-                                        // unten.
-                                        withEnv(["NEXUS_URL=${cfg.nexusUrl}",
-                                                 "NEXUS_PYPI_HOSTED=${cfg.hostedRepo}",
-                                                 "ARCHIVE=${archive}"]) {
-                                            // Secret nur fuer diesen einen sh-Schritt gebunden
-                                            // und von Jenkins im Log maskiert. Es wird NICHT in
-                                            // den Groovy-String interpoliert - das Skript liest
-                                            // es selbst aus der Umgebung.
-                                            withCredentials([usernamePassword(
-                                                    credentialsId: cfg.credentialsId,
-                                                    usernameVariable: 'NEXUS_USER',
-                                                    passwordVariable: 'NEXUS_PASS')]) {
-                                                sh 'bash "$CI_LIB_DIR/publish-pypi.sh" "$ARCHIVE"'
-                                            }
-                                        }
+                                        publish(archive: archive,
+                                                nexusUrl: cfg.nexusUrl,
+                                                hostedRepo: cfg.hostedRepo,
+                                                credentialsId: cfg.credentialsId)
                                     }
                                     versions[pkg] = "${distName} ${version}"
                                 }
@@ -173,43 +135,137 @@ def call(Closure body) {
                                  allowEmptyArchive: true, fingerprint: true
             }
             cleanup {
-                sh 'rm -rf dist'
-                script {
-                    if (env.CI_LIB_DIR) {
-                        sh 'rm -rf "$CI_LIB_DIR"'
-                    }
-                }
+                script { cleanup() }
             }
         }
     }
 }
 
-// Schreibt die Skripte aus resources/ auf den Agent und gibt das Verzeichnis
-// zurueck. libraryResource liefert nur den Dateiinhalt als String - resources/
-// selbst liegt nie auf dem Agent.
+// ---------------------------------------------------------------------------
+// Einzel-Steps
+// ---------------------------------------------------------------------------
+
+// Schreibt die Skripte aus resources/ nach libDir() und merkt sich den Pfad in
+// env.CI_LIB_DIR - env, nicht lokale Variable, damit spaetere Stages und der
+// post-Block ihn sehen. libraryResource liefert nur den Dateiinhalt als String;
+// resources/ selbst liegt nie auf dem Agent.
 //
-// Das Ziel liegt im Checkout, faellt dort aber nicht auf: der fuehrende Punkt
-// haelt es aus dem '*/'-Glob von changed-packages.sh heraus (Bash-Globs
-// matchen versteckte Verzeichnisse ohne dotglob nicht) und faellt beim
-// Durchsehen des Checkouts nicht auf. Als Paket wuerde targetDir ohnehin nie
-// zaehlen, auch ohne den Punkt: all_packages() verlangt zusaetzlich
-// pyproject.toml, setup.py oder __init__.py - die hier nie liegen.
-//
-// Aufgerufen wird immer als 'bash <pfad>': writeFile setzt kein
-// Ausfuehrbar-Bit, und der Umweg ueber bash macht das auch unnoetig.
-//
-// Kein Default-Wert fuer targetDir: Groovy erzeugt fuer einen Default-Parameter
-// eine synthetische parameterlose Ueberladung, und ob die wie der Rest dieser
-// Methode CPS-transformiert wird (die Methode ruft mit writeFile/echo echte
-// Pipeline-Steps auf), ist eine bekannte Fehlerquelle. Der Aufrufer uebergibt
-// das Zielverzeichnis deshalb immer explizit.
-private String materializeScripts(String targetDir) {
+// Aufgerufen wird immer als 'bash <pfad>': writeFile setzt kein Ausfuehrbar-Bit,
+// und der Umweg ueber bash macht das auch unnoetig. Idempotent.
+String install() {
+    String dir = libDir()
     List names = ['changed-packages.sh', 'build-sdist.sh', 'sdist-meta.sh', 'publish-pypi.sh']
-    names.each { n ->
-        writeFile file: "${targetDir}/${n}",
+    for (String n : names) {
+        writeFile file: "${dir}/${n}",
                   text: libraryResource(resource: "de/firma/ci/${n}", encoding: 'UTF-8'),
                   encoding: 'UTF-8'
     }
-    echo "Skripte nach ${targetDir}/ geschrieben: ${names.join(', ')}"
-    return targetDir
+    env.CI_LIB_DIR = dir
+    echo "Skripte nach ${dir}/ geschrieben: ${names.join(', ')}"
+    return dir
+}
+
+// Geaenderte Pakete seit base; leere Basis heisst "alle". Auto-Erkennung der
+// Paketordner (siehe changed-packages.sh).
+List changedPackages(String base) {
+    return changedPackages(base, '')
+}
+
+// Wie oben, aber mit fester Paketliste (Leerzeichen-getrennt) statt
+// Auto-Erkennung. Leeres packages = Auto-Erkennung.
+List changedPackages(String base, String packages) {
+    requireInstalled()
+    String out
+    withEnv(["BASE=${base ?: ''}", "PACKAGES=${packages ?: ''}"]) {
+        out = sh(returnStdout: true,
+                 script: 'bash "$CI_LIB_DIR/changed-packages.sh" "$BASE"').trim()
+    }
+    return out ? (out.split('\n') as List) : []
+}
+
+// Baut die sdist eines Paketordners und gibt den Pfad zurueck, den das Skript
+// meldet (dist/<datei>). Der Dateiname wird NICHT selbst zusammengebaut, weil
+// setuptools Name und Version normalisiert.
+String buildSdist(String pkg) {
+    requireInstalled()
+    String archive
+    withEnv(["PKG=${pkg}"]) {
+        archive = sh(returnStdout: true,
+                     script: 'bash "$CI_LIB_DIR/build-sdist.sh" "$PKG"').trim()
+    }
+    return archive
+}
+
+// Name oder Version aus der PKG-INFO der sdist - nicht aus dem Dateinamen,
+// weil Paketnamen selbst Bindestriche enthalten duerfen. field ist auf die
+// Whitelist begrenzt und geht trotzdem per withEnv rein: die Whitelist ist eine
+// zweite Sicherung, keine Alternative zur Disziplin.
+String meta(String archive, String field) {
+    requireInstalled()
+    if (!(field in ['name', 'version'])) {
+        error "pyMonorepo.meta: field muss 'name' oder 'version' sein, war '${field}'"
+    }
+    String value
+    withEnv(["ARCHIVE=${archive}", "FIELD=${field}"]) {
+        value = sh(returnStdout: true,
+                   script: 'bash "$CI_LIB_DIR/sdist-meta.sh" "$ARCHIVE" "$FIELD"').trim()
+    }
+    return value
+}
+
+// Laedt eine sdist in das Nexus-PyPI-HOSTED-Repo.
+//   publish(archive: 'dist/x-1.0.tar.gz', nexusUrl: 'https://nexus...',
+//           hostedRepo: 'pypi-hosted', credentialsId: 'nexus-pypi-deploy')
+// Das Secret wird nur fuer diesen einen sh-Schritt gebunden und von Jenkins im
+// Log maskiert; das Skript liest es aus der Umgebung, nicht aus argv.
+void publish(Map args) {
+    requireInstalled()
+    for (String k : ['archive', 'nexusUrl']) {
+        if (!args[k]) {
+            error "pyMonorepo.publish: ${k} fehlt"
+        }
+    }
+    withEnv(["NEXUS_URL=${args.nexusUrl}",
+             "NEXUS_PYPI_HOSTED=${args.hostedRepo ?: 'pypi-hosted'}",
+             "ARCHIVE=${args.archive}"]) {
+        withCredentials([usernamePassword(
+                credentialsId: args.credentialsId ?: 'nexus-pypi-deploy',
+                usernameVariable: 'NEXUS_USER',
+                passwordVariable: 'NEXUS_PASS')]) {
+            sh 'bash "$CI_LIB_DIR/publish-pypi.sh" "$ARCHIVE"'
+        }
+    }
+}
+
+// Entfernt dist/ und das Skriptverzeichnis. Idempotent; laeuft auch, wenn
+// install() nie aufgerufen wurde.
+void cleanup() {
+    sh 'rm -rf dist'
+    if (env.CI_LIB_DIR) {
+        sh 'rm -rf "$CI_LIB_DIR"'
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Private Helfer
+// ---------------------------------------------------------------------------
+
+// Das Ziel liegt im Checkout, faellt dort aber nicht auf: der fuehrende Punkt
+// haelt es aus dem '*/'-Glob von changed-packages.sh heraus. Als Paket wuerde
+// es ohnehin nie zaehlen - dafuer fehlen pyproject.toml/setup.py/setup.cfg.
+// Eine Methode statt eines statischen Felds: statische Felder in vars/ werden
+// zwischen Builds geteilt und machen mit CPS/Serialisierung Aerger.
+private String libDir() { return '.ci-lib' }
+
+private void requireInstalled() {
+    if (!env.CI_LIB_DIR) {
+        error 'pyMonorepo: install() wurde nicht aufgerufen - env.CI_LIB_DIR fehlt'
+    }
+}
+
+// Basis fuer den Diff: letzter erfolgreicher Build (Git-Plugin setzt das),
+// sonst HEAD~1, sonst leer -> alles bauen.
+private String defaultBase() {
+    return env.GIT_PREVIOUS_SUCCESSFUL_COMMIT ?:
+        sh(returnStdout: true, script: 'git rev-parse HEAD~1 2>/dev/null || true').trim()
 }

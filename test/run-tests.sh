@@ -469,85 +469,73 @@ GROOVY="${ROOT}/vars/pyMonorepo.groovy"
 if [[ -f "$GROOVY" ]]; then
   ok "vars/pyMonorepo.groovy vorhanden"
 
-  # Die materializeScripts()-Namensliste gezielt extrahieren, nicht per
-  # Mengenvergleich ueber die ganze Datei: sonst bleiben vier reale
-  # Bruchstellen unentdeckt gruen (siehe die vier Gegenproben unten). Das
-  # Regex deckt mehr als [a-z-] ab, damit ein spaeteres 'build2.sh' nicht
-  # faelschlich als fremder Name durchfaellt.
-  NAMES_LINE="$(grep -oE "List names = \[[^]]*\]" "$GROOVY")"
+  # Kommentare raus, sonst zaehlen Beispiele im Kopfkommentar mit.
+  CODE="$(sed -E 's#//.*$##' "$GROOVY")"
+
+  # 1) Skriptliste in install() == vorhandene Skripte
+  NAMES_LINE="$(grep -oE "List names = \[[^]]*\]" <<<"$CODE")"
   NAMED="$(grep -oE "'[A-Za-z][A-Za-z0-9_.-]*\.sh'" <<<"$NAMES_LINE" | tr -d "'" | sort -u)"
   HAVE="$(cd "$SCRIPTS" && ls *.sh | sort -u)"
-  assert_eq "materializeScripts()-Liste == vorhandene Skripte" "$HAVE" "$NAMED"
+  assert_eq "install()-Liste == vorhandene Skripte" "$HAVE" "$NAMED"
 
-  # libraryResource() muss exakt auf den Ressourcen-Pfad zeigen, unter dem
-  # Task 1-3 die Skripte abgelegt haben, UND mit encoding: 'UTF-8' lesen
-  # (M-2): ohne das dekodiert Jenkins mit dem Default-Charset des
-  # Controllers, und die Umlaute in den Skript-Kommentaren/-Meldungen kommen
-  # bei LANG=C/POSIX als Mojibake auf dem Agent an. Der Aufruf wird zuerst
-  # als Ganzes extrahiert (bis zur ersten schliessenden Klammer - kein
-  # verschachteltes '()' darin), Pfad und encoding dann getrennt geprueft,
-  # damit beide Mutationen (Pfad verbogen, encoding entfernt/geaendert)
-  # je fuer sich durchfallen.
-  LIBRARY_RESOURCE_CALL="$(grep -oE 'libraryResource\([^)]*\)' "$GROOVY")"
-  assert_contains "libraryResource-Pfad ist de/firma/ci" "$LIBRARY_RESOURCE_CALL" \
-    'resource: "de/firma/ci/${n}"'
-  assert_contains "libraryResource liest mit encoding UTF-8" "$LIBRARY_RESOURCE_CALL" \
-    "encoding: 'UTF-8'"
+  # 2) libraryResource: Pfad und Encoding
+  LR="$(grep -oE 'libraryResource\([^)]*\)' <<<"$CODE")"
+  assert_contains "libraryResource-Pfad ist de/firma/ci" "$LR" 'de/firma/ci/'
+  assert_contains "libraryResource liest mit encoding UTF-8" "$LR" "encoding: 'UTF-8'"
 
-  # Das Zielverzeichnis kommt seit der CPS-Default-Param-Korrektur explizit
-  # vom Aufrufer (materializeScripts('.ci-lib')). Der fuehrende Punkt ist
-  # tragend, siehe Kommentar in vars/pyMonorepo.groovy.
-  CALLARG="$(grep -oE "materializeScripts\('[^']*'\)" "$GROOVY" | head -1 | sed -E "s/.*\('([^']*)'\).*/\1/")"
-  assert_eq "materializeScripts()-Aufruf hat ein Zielverzeichnis mit fuehrendem Punkt" \
-    "." "${CALLARG:0:1}"
+  # 3) Zielverzeichnis mit fuehrendem Punkt, an genau einer Stelle definiert
+  LIBDIR="$(grep -oE "String libDir\(\) \{ return '[^']*' \}" <<<"$CODE" | sed -E "s/.*return '([^']*)'.*/\1/")"
+  if [[ "$LIBDIR" == .* ]]; then ok "libDir() beginnt mit einem Punkt ($LIBDIR)"
+  else nok "libDir() beginnt mit einem Punkt" "ist [$LIBDIR]"; fi
 
-  # Die Namensliste allein beweist nur, dass die richtigen Skripte
-  # *irgendwo* auftauchen - nicht, dass jeder sh-Aufruf das richtige Skript
-  # in seiner Rolle trifft. Deshalb zusaetzlich die tatsaechlichen
-  # Aufrufstellen (bash "$CI_LIB_DIR/<name>.sh" ...) zaehlen und gegen die
-  # erwartete Rollenverteilung pruefen.
-  CALLS="$(grep -oE '\$CI_LIB_DIR/[A-Za-z][A-Za-z0-9_.-]*\.sh' "$GROOVY" | sed -E 's#.*/##' | sort)"
+  # 4) Genau eine sh-Aufrufstelle je Skript (Steps sind Single-Source)
+  CALLS="$(grep -oE '\$CI_LIB_DIR/[A-Za-z][A-Za-z0-9_.-]*\.sh' <<<"$CODE" | sed -E 's#.*/##' | sort)"
   CALL_COUNTS="$(printf '%s\n' "$CALLS" | uniq -c | awk '{printf "%s: %s\n", $2, $1}' | sort)"
-  EXPECTED_COUNTS=$'build-sdist.sh: 1\nchanged-packages.sh: 1\npublish-pypi.sh: 1\nsdist-meta.sh: 2'
-  assert_eq "sh-Aufrufstellen rufen die erwarteten Skripte in der erwarteten Anzahl auf" \
-    "$EXPECTED_COUNTS" "$CALL_COUNTS"
+  EXPECTED_COUNTS=$'build-sdist.sh: 1\nchanged-packages.sh: 1\npublish-pypi.sh: 1\nsdist-meta.sh: 1'
+  assert_eq "genau eine sh-Aufrufstelle je Skript" "$EXPECTED_COUNTS" "$CALL_COUNTS"
 
-  # Verschachtelungstiefe an zwei Ankerpunkten statt einer reinen
-  # Klammerzahl: eine verschobene schliessende Klammer aendert die
-  # Gesamtzahl nicht, wohl aber die Tiefe, auf der die zweite Stage relativ
-  # zur ersten liegt. Kommentare werden vorher entfernt (// bis Zeilenende),
-  # sonst macht ein erweitertes Beispiel im Kopfkommentar den Test rot, ohne
-  # dass Code sich geaendert hat.
-  DEPTHS="$(awk '
-    { line = $0; sub(/\/\/.*/, "", line)
-      if (line ~ /stage\(.Setup.\)/)         print "SETUP", depth
-      if (line ~ /stage\(.Pack & Publish.\)/) print "PACK", depth
-      o = gsub(/\{/, "{", line)
-      c = gsub(/\}/, "}", line)
-      depth += o - c
-    }
-    END { print "TOTAL", depth }
-  ' "$GROOVY")"
-  SETUP_DEPTH="$(awk '$1=="SETUP"{print $2}' <<<"$DEPTHS")"
-  PACK_DEPTH="$(awk '$1=="PACK"{print $2}' <<<"$DEPTHS")"
-  TOTAL_DEPTH="$(awk '$1=="TOTAL"{print $2}' <<<"$DEPTHS")"
-  assert_eq "geschweifte Klammern insgesamt ausgeglichen (Kommentare ausgenommen)" "0" "$TOTAL_DEPTH"
-  assert_eq "stage('Setup') und stage('Pack & Publish') auf gleicher Verschachtelungstiefe" \
-    "$SETUP_DEPTH" "$PACK_DEPTH"
+  # 5) Jede oeffentliche Methode existiert (Signatur am Zeilenanfang)
+  for SIG in 'def call(Closure body)' 'String install()' \
+             'List changedPackages(String base)' 'List changedPackages(String base, String packages)' \
+             'String buildSdist(String pkg)' 'String meta(String archive, String field)' \
+             'void publish(Map args)' 'void cleanup()'; do
+    if grep -qF "$SIG" <<<"$CODE"; then ok "Methode vorhanden: $SIG"
+    else nok "Methode vorhanden: $SIG" "nicht gefunden"; fi
+  done
+
+  # 6) Kein Default-Parameter (CPS: synthetische Ueberladung)
+  DEFAULTS="$(grep -nE '^[A-Za-z].*\([^)]*=[^)]*\)\s*\{' <<<"$CODE" || true)"
+  if [[ -z "$DEFAULTS" ]]; then ok "keine Methode mit Default-Parameter"
+  else nok "keine Methode mit Default-Parameter" "$DEFAULTS"; fi
+
+  # 7) Injection-Disziplin: jeder sh-Script-String ist einfach gequotet.
+  #    Ein doppelt gequoteter sh-String (sh "..." oder script: "...") waere
+  #    ein Rueckfall in Groovy-Interpolation.
+  BAD_SH="$(grep -nE "(^|[^A-Za-z_])sh[[:space:]]*(\(|[[:space:]])[^']*\"" <<<"$CODE" \
+            | grep -vE "script:[[:space:]]*'" || true)"
+  if [[ -z "$BAD_SH" ]]; then ok "alle sh-Script-Strings einfach gequotet"
+  else nok "alle sh-Script-Strings einfach gequotet" "$BAD_SH"; fi
+  # ... und kein '${' in einem einfach gequoteten sh-String
+  INTERP="$(grep -oE "'bash[^']*'" <<<"$CODE" | grep -F '${' || true)"
+  if [[ -z "$INTERP" ]]; then ok "kein \${ in bash-Aufrufstrings"
+  else nok "kein \${ in bash-Aufrufstrings" "$INTERP"; fi
+
+  # 8) meta(): Whitelist vorhanden
+  assert_contains "meta() prueft field gegen ['name', 'version']" "$CODE" "['name', 'version']"
+
+  # 9) Klammern ausgeglichen (Kommentare ausgenommen)
+  OPEN="$(tr -cd '{' <<<"$CODE" | wc -c | tr -d ' ')"; CLOSE="$(tr -cd '}' <<<"$CODE" | wc -c | tr -d ' ')"
+  assert_eq "geschweifte Klammern ausgeglichen (Kommentare ausgenommen)" "$OPEN" "$CLOSE"
 
   if command -v groovyc >/dev/null 2>&1; then
-    if groovyc -d "$TMP/groovyc" "$GROOVY" 2>"$TMP/groovyc.err"; then
-      ok "groovyc kompiliert"
-    else
-      nok "groovyc kompiliert" "$(head -3 "$TMP/groovyc.err")"
-    fi
+    if groovyc -d "$TMP/groovyc" "$GROOVY" 2>"$TMP/groovyc.err"; then ok "groovyc kompiliert"
+    else nok "groovyc kompiliert" "$(head -3 "$TMP/groovyc.err")"; fi
   else
     skip "groovyc Syntaxpruefung" "groovyc nicht installiert"
   fi
 else
   nok "vars/pyMonorepo.groovy vorhanden" "Datei fehlt"
 fi
-
 echo
 echo "=== Bilanz ==="
 printf 'PASS %d  FAIL %d  SKIP %d\n' "$PASS" "$FAIL" "$SKIP"

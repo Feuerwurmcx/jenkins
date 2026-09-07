@@ -35,6 +35,39 @@ case "${NEXUS_USER}${NEXUS_PASS}" in
     exit 1 ;;
 esac
 
+# Leerzeichen, Tabulatoren und Zeilenumbrueche in URL oder Repo-Namen lehnt curl
+# mit "URL rejected: Malformed input to a URL function" (Exit 3) ab - ohne zu
+# sagen, welcher Wert schuld ist. Haeufigste Ursachen: ein CR aus einem
+# CRLF-Editor am Ende der Zeile, oder ein uebersehenes Leerzeichen in der
+# Jenkinsfile-Konfiguration. Beides sieht man dem Wert nicht an, deshalb hier
+# vorab pruefen und die Variable benennen.
+#
+# Der Wert selbst wird NICHT ausgegeben: NEXUS_URL und NEXUS_PYPI_HOSTED sind
+# zwar harmlos, aber die Meldung soll fuer jede Variable dieselbe Form haben,
+# damit hier spaeter niemand versehentlich ein Secret ins Log schreibt.
+reject_whitespace() {  # <variablenname> <wert>
+  local name="$1" value="$2" i ch pos=""
+  case "$value" in
+    *[[:space:]]*) : ;;
+    *) return 0 ;;
+  esac
+  for (( i=0; i<${#value}; i++ )); do
+    ch="${value:i:1}"
+    case "$ch" in
+      [[:space:]]) pos=$((i + 1)); break ;;
+    esac
+  done
+  echo "FEHLER: ${name} enthaelt an Position ${pos} ein Leerzeichen, einen" >&2
+  echo "        Tabulator oder einen Zeilenumbruch. curl lehnt die URL sonst" >&2
+  echo "        mit 'Malformed input to a URL function' ab (Exit 3)." >&2
+  echo "        Haeufig ein CR aus einem CRLF-Editor oder ein Leerzeichen in" >&2
+  echo "        der Jenkinsfile-Konfiguration. Sichtbar machen mit:" >&2
+  echo "            printf '%s' \"\$${name}\" | od -c | head -3" >&2
+  exit 1
+}
+reject_whitespace NEXUS_URL "$NEXUS_URL"
+reject_whitespace NEXUS_PYPI_HOSTED "$NEXUS_PYPI_HOSTED"
+
 [[ -f "$ARCHIVE" ]] || { echo "FEHLER: $ARCHIVE nicht gefunden" >&2; exit 1; }
 
 BASE="${NEXUS_URL%/}"

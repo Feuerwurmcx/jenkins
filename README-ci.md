@@ -225,6 +225,15 @@ diesen Ablagepfad vergibt Nexus selbst aus Name und Version, die es aus der
 twine war das nicht anders: twine postete ebenfalls gegen die Repo-Wurzel,
 nicht gegen `/packages/`.
 
+Bricht der Upload mit `curl: (3) URL rejected: Malformed input to a URL
+function` ab, steckt ein Leerzeichen, ein Tabulator oder ein Carriage Return in
+`nexusUrl` oder `hostedRepo` - meist ein CR aus einem CRLF-Editor oder ein
+uebersehenes Leerzeichen in der Jenkinsfile-Konfiguration. `publish-pypi.sh`
+faengt das inzwischen vorab ab und nennt die betroffene Variable samt Position,
+bevor curl ueberhaupt laeuft. Sichtbar machen laesst es sich mit:
+
+    printf '%s' "$NEXUS_URL" | od -c | head -3
+
 `publish-pypi.sh` prueft ausserdem vorab ueber die Nexus-REST-API, ob
 `NEXUS_PYPI_HOSTED` wirklich ein hosted-PyPI-Repo ist (Exit 3 bei group, bei
 proxy und bei einem hosted-Repo, das kein PyPI-Format hat). Ist die API nicht

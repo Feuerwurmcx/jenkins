@@ -1166,6 +1166,54 @@ assert_rc "Archivpfad mit ',' -> rc 0" 0 "$PUB_RC"
 assert_contains "Archivpfad mit ',' landet vollstaendig (in Anfuehrungszeichen) in argv" \
   "$PUB_ARGS" "pypi.asset=@\"${COMMA_ARCHIVE}\""
 
+# Leerzeichen, Tabs und CR in NEXUS_URL/NEXUS_PYPI_HOSTED lehnt curl mit Exit 3
+# ab ("Malformed input to a URL function") und nennt dabei nicht, welcher Wert
+# schuld ist. Das Skript prueft deshalb vorab. Kein Stub noetig: der Abbruch
+# passiert, bevor curl ueberhaupt aufgerufen wird.
+#
+# Achtung bei den Assertions: rc 1 allein beweist hier NICHTS - ohne den Guard
+# scheitert curl mit Exit 3, und den bildet das Skript ebenfalls auf 1 ab. Was
+# den Guard belegt, ist dass die Meldung die Variable nennt UND dass curl gar
+# nicht erst lief (keine "curl scheiterte"-Zeile).
+url_guard() {  # <NEXUS_URL> <NEXUS_PYPI_HOSTED>
+  UG_OUT="$(NEXUS_URL="$1" NEXUS_PYPI_HOSTED="$2" NEXUS_USER=u NEXUS_PASS=p \
+            SKIP_REPO_CHECK=1 bash "$SCRIPTS/publish-pypi.sh" "$ARCHIVE" 2>&1)"
+  UG_RC=$?
+}
+
+# <name> <erwartete Variable im Text> - prueft rc, Variablennennung und dass
+# curl nicht gelaufen ist.
+assert_guard() {
+  assert_rc "$1 -> rc 1" 1 "$UG_RC"
+  assert_contains "$1 -> Meldung nennt $2" "$UG_OUT" "$2"
+  if grep -q 'curl scheiterte' <<<"$UG_OUT"; then
+    nok "$1 -> bricht VOR dem curl-Aufruf ab" "curl lief trotzdem"
+  else ok "$1 -> bricht VOR dem curl-Aufruf ab"; fi
+}
+
+url_guard "$(printf 'https://nexus.example.com\r')" pypi-hosted
+assert_guard "NEXUS_URL mit CR" "NEXUS_URL"
+
+url_guard " https://nexus.example.com" pypi-hosted
+assert_guard "NEXUS_URL mit fuehrendem Leerzeichen" "NEXUS_URL"
+
+url_guard "https://nexus example.com" pypi-hosted
+assert_guard "NEXUS_URL mit Leerzeichen im Host" "NEXUS_URL"
+assert_contains "Meldung nennt den od-Befehl zum Nachsehen" "$UG_OUT" "od -c"
+
+url_guard "https://nexus.example.com$(printf '\t')" pypi-hosted
+assert_guard "NEXUS_URL mit Tabulator" "NEXUS_URL"
+
+url_guard "https://nexus.example.com" "hosted pypi"
+assert_guard "NEXUS_PYPI_HOSTED mit Leerzeichen" "NEXUS_PYPI_HOSTED"
+
+# Der Wert selbst darf nicht im Klartext in der Meldung stehen - dieselbe Form
+# fuer alle Variablen, damit spaeter niemand versehentlich ein Secret ausgibt.
+url_guard "https://geheim-intern.example.com " pypi-hosted
+if grep -q 'geheim-intern' <<<"$UG_OUT"; then
+  nok "Guard gibt den Wert nicht aus" "Wert steht in der Meldung"
+else ok "Guard gibt den Wert nicht aus"; fi
+
 skip "publish-pypi.sh echter Netzwerk-Upload" "braucht ein erreichbares Nexus - bewusst nicht getestet"
 
 echo

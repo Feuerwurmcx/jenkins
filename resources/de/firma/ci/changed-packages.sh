@@ -40,7 +40,10 @@ BASE="${1:-}"
 # weiterhin NICHT zaehlt (dort folgt auf "project" kein "]", sondern ".").
 # Bekannte Grenze, bewusst nicht behoben: ein "[project]" als Text innerhalb
 # eines mehrzeiligen TOML-Strings wuerde faelschlich mitgezaehlt - sauber nur
-# mit einem echten TOML-Parser loesbar.
+# mit einem echten TOML-Parser loesbar. Dasselbe gilt fuer ein "[metadata]"
+# in einer configparser-Fortsetzungszeile (setup.cfg): eine mehrzeilige
+# Werte-Zeile, die zufaellig wie ein Abschnittskopf aussieht, wuerde ebenso
+# faelschlich mitgezaehlt.
 #
 # Bei setup.cfg gilt dieselbe Ueberlegung wie bei pyproject.toml: eine
 # Wurzel-setup.cfg mit nur Linter-Konfiguration ([flake8], [mypy], ...) ist in
@@ -60,13 +63,31 @@ BASE="${1:-}"
 # oder pyproject.toml hat eine setup.py in der Wurzel praktisch keinen
 # verbreiteten Nur-Werkzeugkonfiguration-Zweck - sie existiert so gut wie
 # immer, um ein Paket zu bauen.
+# Meldet auf stderr, WAS die Wurzelerkennung ausgeloest hat - ohne das waere
+# "Repo gilt als ein Paket" nur indirekt sichtbar (Pakete : ., Stage
+# Wurzelpaket), nie der Grund (I-3, M-7). Macht damit auch die dokumentierten
+# Grenzen oben (mehrzeiliger TOML-String, configparser-Fortsetzungszeile) in
+# Sekunden diagnostizierbar. Faellt nach stderr, nicht stdout: stdout ist die
+# Paketliste, die der Aufrufer per 'sh(returnStdout: true)' liest.
+root_hint() {
+  echo "HINWEIS: Paket-Metadaten in der Repo-Wurzel (${1}) - das Repo gilt als EIN Paket '.'" >&2
+}
+
 root_is_package() {
-  [[ -f setup.py ]] && return 0
+  if [[ -f setup.py ]]; then
+    root_hint setup.py
+    return 0
+  fi
   if [[ -f setup.cfg ]] && grep -qE '^[[:space:]]*\[[[:space:]]*(metadata|options)[[:space:]]*\][[:space:]]*(#.*)?$' setup.cfg; then
+    root_hint setup.cfg
     return 0
   fi
   [[ -f pyproject.toml ]] || return 1
-  grep -qE '^[[:space:]]*\[[[:space:]]*(project|tool\.poetry)[[:space:]]*\][[:space:]]*(#.*)?$' pyproject.toml
+  if grep -qE '^[[:space:]]*\[[[:space:]]*(project|tool\.poetry)[[:space:]]*\][[:space:]]*(#.*)?$' pyproject.toml; then
+    root_hint pyproject.toml
+    return 0
+  fi
+  return 1
 }
 
 all_packages() {

@@ -1683,6 +1683,27 @@ assert_eq "Wurzelpaket + alpha/ geaendert, PACKAGES=alpha -> alpha" "alpha" \
 assert_eq "I-1: Mischform, PACKAGES='. alpha' -> . und alpha" "$(printf '.\nalpha')" \
   "$(cd "$RMIX" && PACKAGES='. alpha' $CP HEAD~1 2>/dev/null)"
 
+# I-3/M-7: root_is_package() nennt seinen Ausloeser auf stderr - ohne das war
+# "Repo gilt als ein Paket" nur indirekt sichtbar (Pakete : ., Stage
+# Wurzelpaket), nie der Grund. Muss GENAU EINMAL erscheinen und darf NICHT
+# auf stdout landen (stdout ist die Paketliste, sie wird von
+# 'sh(returnStdout: true)' gelesen).
+HINT_ERR_TOML="$(cd "$SREPO" && $CP '' 2>&1 >/dev/null)"
+assert_contains "I-3/M-7: Ausloeser pyproject.toml auf stderr" \
+  "$HINT_ERR_TOML" "Paket-Metadaten in der Repo-Wurzel (pyproject.toml)"
+assert_eq "I-3/M-7: Hinweis erscheint genau einmal" "1" \
+  "$(grep -c 'Paket-Metadaten in der Repo-Wurzel' <<<"$HINT_ERR_TOML")"
+assert_eq "I-3/M-7: stdout bleibt exakt '.' trotz Hinweis auf stderr" "." \
+  "$(cd "$SREPO" && $CP '' 2>/dev/null)"
+
+HINT_ERR_SETUPPY="$(cd "$RSETUP" && $CP '' 2>&1 >/dev/null)"
+assert_contains "I-3/M-7: Ausloeser setup.py auf stderr" \
+  "$HINT_ERR_SETUPPY" "Paket-Metadaten in der Repo-Wurzel (setup.py)"
+
+HINT_ERR_CFG="$(cd "$RCFGMETA" && $CP '' 2>&1 >/dev/null)"
+assert_contains "I-3/M-7: Ausloeser setup.cfg auf stderr" \
+  "$HINT_ERR_CFG" "Paket-Metadaten in der Repo-Wurzel (setup.cfg)"
+
 # Repo ganz ohne Paket: leere Ausgabe UND ein Hinweis - der stille Leerlauf
 # war der eigentliche Fehler.
 RNONE="${TMP}/rootrepo-none"; rm -rf "$RNONE"; mkdir -p "$RNONE/doku"

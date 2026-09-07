@@ -174,6 +174,9 @@ STUB
 #                    Umbruch-Guard begruendet ist - 'cat "$ERR_FILE" >&2' im
 #                    Skript muss diesen Text tatsaechlich ausgeben)
 #   STUB_REPOS_JSON JSON, das der Repo-Typ-Check-Aufruf auf stdout liefert
+#   STUB_REPOS_CURL_RC Exit-Code NUR des Repo-Typ-Check-Aufrufs (Default 0) -
+#                    simuliert eine nicht erreichbare Repositories-REST-API
+#                    unabhaengig vom Index-/Upload-Aufruf (I-A)
 make_curl_stub() {  # -> Verzeichnis fuer PATH auf stdout
   local d="${TMP}/curl-stub-bin"
   mkdir -p "$d"
@@ -183,7 +186,13 @@ make_curl_stub() {  # -> Verzeichnis fuer PATH auf stdout
 set -u
 : "${STUB_DIR:?STUB_DIR fehlt}"
 printf '%s\n' "$@" >> "${STUB_DIR}/curl-args"
-cat >> "${STUB_DIR}/curl-stdin"
+# Nur lesen, wenn tatsaechlich etwas ansteht: das echte Skript speist jeden
+# Aufruf ueber 'cfg_credentials | curl ...' (eine Pipe), aber ein direkter
+# Testaufruf ohne speisende Pipe wuerde 'cat' sonst am interaktiven stdin
+# haengen lassen, statt die Suite rot zu machen.
+if [[ ! -t 0 ]]; then
+  cat >> "${STUB_DIR}/curl-stdin"
+fi
 
 # Drei Aufrufarten, unterschieden an der URL - seit der Vorabpruefung nutzen
 # zwei von ihnen --output, das Flag taugt nicht mehr zur Unterscheidung.
@@ -206,7 +215,7 @@ done
 case "$url" in
   */service/rest/v1/repositories)
     printf '%s' "${STUB_REPOS_JSON:-[]}"
-    exit 0 ;;
+    exit "${STUB_REPOS_CURL_RC:-0}" ;;
   */service/rest/v1/components\?repository=*)
     ;;  # Upload - faellt durch zum Code unterhalb dieses case-Blocks
   */simple/*)
@@ -998,27 +1007,34 @@ assert_contains "URL ist die Components-API" "$PUB_ARGS" \
   "https://nexus.example.com/service/rest/v1/components?repository=pypi-hosted"
 assert_contains "Formularfeld pypi.asset zeigt aufs Archiv" "$PUB_ARGS" \
   "pypi.asset=@\"${ARCHIVE}\""
-assert_contains "POST wird verwendet" "$PUB_ARGS" "POST"
+# Exakte Zeile statt Substring: ein "POST" irgendwo im argv-Dump aller
+# curl-Aufrufe dieses Laufs waere kein Beleg dafuer, dass der Upload wirklich
+# per POST geht (grep -qx statt assert_contains).
+if grep -qx 'POST' <<<"$PUB_ARGS"; then
+  ok "POST wird verwendet"
+else
+  nok "POST wird verwendet" "keine eigene 'POST'-Zeile in curl-args gefunden"
+fi
 # Q-2: der Stub druckt den HTTP-Status nur, wenn --write-out in argv steht -
 # ohne diese Assertion bliebe ein versehentlich gestrichenes --write-out
 # unbemerkt gruen (der *-Zweig sieht dann ein leeres $HTTP).
-# M-1: seit der Vorabpruefung enthaelt $PUB_ARGS die argv ALLER curl-Aufrufe
-# dieses Laufs (Index + Upload), und die Index-Abfrage fuehrt '--write-out'
-# selbst mit. Ein assert_contains auf den blossen Substring waere deshalb
-# wirkungslos - er bliebe gruen, selbst wenn NUR der Upload-Aufruf das Flag
-# verliert. Stattdessen auf zwei Vorkommen zaehlen (Index-Aufruf plus
-# Upload-Aufruf; SKIP_REPO_CHECK=1 ist hier gesetzt, der Repo-Typ-Check
-# entfaellt also).
-assert_eq "Status wird per --write-out geholt (Index- und Upload-Aufruf)" "2" \
+# I-A: SKIP_REPO_CHECK=1 bestaetigt den Repo-Typ nie (REPO_TYPE_BESTAETIGT
+# bleibt 0), also kehrt already_published seither sofort zurueck, OHNE den
+# Index abzufragen - nur noch der Upload-Aufruf laeuft. Vor I-A waren das zwei
+# Aufrufe (Index + Upload); das ist jetzt genau der Fall, den die zwei
+# I-A-Tests weiter unten ("SKIP_REPO_CHECK=1 + waere-Treffer") gezielt
+# pruefen.
+assert_eq "Status wird per --write-out geholt (nur Upload-Aufruf, kein Index seit I-A)" "1" \
   "$(grep -c '^%{http_code}$' <<<"$PUB_ARGS")"
 # I-2: der Testkatalog der Spec versprach einen Fall "SKIP_REPO_CHECK=1
-# ueberspringt den Repo-Typ-Check (nur ein curl-Aufruf)", den es bisher nicht
-# gab. Jeder curl-Aufruf traegt genau ein '--config'-Argument (die Config kommt
-# ueber stdin) - Vorkommen davon in curl-args zaehlen also Aufrufe, nicht nur
-# irgendein Merkmal des Aufrufs.
-# Zwei Aufrufe seit der Vorabpruefung: Simple-Index und Upload. Der
-# Repo-Typ-Check kommt bei SKIP_REPO_CHECK=1 nicht dazu.
-assert_eq "SKIP_REPO_CHECK=1 -> Index und Upload, kein Repo-Check" "2" \
+# ueberspringt den Repo-Typ-Check", den es bisher nicht gab. Jeder curl-Aufruf
+# traegt genau ein '--config'-Argument (die Config kommt ueber stdin) -
+# Vorkommen davon in curl-args zaehlen also Aufrufe, nicht nur irgendein
+# Merkmal des Aufrufs.
+# Seit I-A nur noch EIN Aufruf: SKIP_REPO_CHECK=1 laesst weder den
+# Repo-Typ-Check noch (mangels bestaetigtem Typ) die Index-Abfrage laufen -
+# nur der Upload bleibt.
+assert_eq "SKIP_REPO_CHECK=1 -> nur Upload (weder Repo-Check noch Index)" "1" \
   "$(grep -c '^--config$' <<<"$PUB_ARGS")"
 
 run_publish created NEXUS_USER=u NEXUS_PASS=p STUB_HTTP=201
@@ -1134,18 +1150,26 @@ else ok "Passwort mit Zeilenumbruch -> zweite Zeile NICHT in der Ausgabe"; fi
 # Q-3: check_repo_type ist vollstaendig ungetestet, solange jeder run_publish-
 # Aufruf SKIP_REPO_CHECK=1 setzt. run_publish_checked laesst den Repo-Typ-
 # Check laufen (beide curl-Aufrufe landen im selben STUB_DIR).
+# $IDX_ARCHIVE ueberschreibt (wie bei run_publish_index) das publizierte
+# Archiv - noetig, seit die bisherigen run_publish_index-Faelle mit einem
+# bestaetigten Repo-Typ hierher umgezogen sind (I-A).
 run_publish_checked() {
-  local sub="$1"; shift
+  local sub="$1" archive="${IDX_ARCHIVE:-$ARCHIVE}"; shift
   PUB_D="${TMP}/pubchecked-${sub}"
   rm -rf "$PUB_D"; mkdir -p "$PUB_D"
   PUB_OUT="$(env "$@" PATH="${CURL_BIN}:${PATH}" STUB_DIR="$PUB_D" \
              NEXUS_URL=https://nexus.example.com \
              NEXUS_PYPI_HOSTED=pypi-hosted \
-             bash "$SCRIPTS/publish-pypi.sh" "$ARCHIVE" 2>&1)"
+             bash "$SCRIPTS/publish-pypi.sh" "$archive" 2>&1)"
   PUB_RC=$?
   PUB_ARGS="$(cat "${PUB_D}/curl-args" 2>/dev/null || true)"
   PUB_STDIN="$(cat "${PUB_D}/curl-stdin" 2>/dev/null || true)"
+  PUB_UPLOADS="$(grep -c 'service/rest/v1/components' <<<"$PUB_ARGS" || true)"
 }
+
+# Fuer die (jetzt haeufigen) Faelle mit bestaetigtem "hosted pypi"-Repo-Typ:
+# eine Kurzform, die STUB_REPOS_JSON nicht an jeder Aufrufstelle wiederholt.
+STUB_REPOS_JSON_HOSTED_PYPI='[{"name":"pypi-hosted","type":"hosted","format":"pypi"}]'
 
 run_publish_checked group NEXUS_USER=u NEXUS_PASS=p \
   STUB_REPOS_JSON='[{"name":"pypi-hosted","type":"group","format":"pypi"}]'
@@ -1162,7 +1186,7 @@ assert_rc "Repo-Check: hosted/maven2 -> rc 3" 3 "$PUB_RC"
 assert_contains "Repo-Check: hosted/maven2 -> Meldung nennt das Format" "$PUB_OUT" "maven2"
 
 run_publish_checked okpypi NEXUS_USER=u NEXUS_PASS=geheim-checked-nicht-in-argv STUB_HTTP=204 \
-  STUB_REPOS_JSON='[{"name":"pypi-hosted","type":"hosted","format":"pypi"}]'
+  STUB_REPOS_JSON="$STUB_REPOS_JSON_HOSTED_PYPI"
 assert_rc "Repo-Check: hosted/pypi -> rc 0, Upload laeuft" 0 "$PUB_RC"
 assert_contains "Repo-Check: hosted/pypi -> OK-Meldung (Upload lief)" "$PUB_OUT" "OK:"
 # Gilt fuer ALLE DREI curl-Aufrufe (Repo-Check, Index und Upload) - derselbe
@@ -1258,7 +1282,15 @@ ARCHIVE_BASE="$(basename "$ARCHIVE")"
 # Upload-Aufrufe - daran haengt der Nachweis, dass wirklich uebersprungen wird).
 # $IDX_ARCHIVE ueberschreibt, welches Archiv publiziert wird (Default $ARCHIVE)
 # - fuer Faelle, die einen anderen Paketnamen oder ein kaputtes Archiv
-# brauchen (M-3, M-9), ohne den Helfer selbst umzubauen.
+# brauchen, ohne den Helfer selbst umzubauen.
+#
+# I-A: SKIP_REPO_CHECK=1 setzt REPO_TYPE_BESTAETIGT nie, also kehrt
+# already_published seit der Kopplung an einen bestaetigten Repo-Typ sofort
+# zurueck, OHNE den Index ueberhaupt abzufragen. Dieser Helfer dient deshalb
+# nur noch dem einen Testfall weiter unten, der genau das belegt - fuer alle
+# Index-Parsing-Faelle (Treffer, Formatvarianten, Fehlerpfade) ist
+# run_publish_checked mit bestaetigtem "hosted pypi" der richtige Helfer,
+# weil dort die Vorabpruefung tatsaechlich laeuft.
 run_publish_index() {
   local sub="$1" archive="${IDX_ARCHIVE:-$ARCHIVE}"; shift
   PUB_D="${TMP}/pubidx-${sub}"
@@ -1274,9 +1306,62 @@ run_publish_index() {
   PUB_UPLOADS="$(grep -c 'service/rest/v1/components' <<<"$PUB_ARGS" || true)"
 }
 
+echo
+echo "=== publish-pypi.sh Vorabpruefung: Kopplung an bestaetigten Repo-Typ (I-A) ==="
+# Die gefaehrliche Richtung aus dem Review: zeigt NEXUS_PYPI_HOSTED auf ein
+# Group-Repo UND ist die Repositories-REST-API nicht erreichbar, aggregiert
+# der Simple-Index der Group seine Member (auch einen PyPI-Proxy) - ein
+# Treffer dort sagt nichts darueber aus, ob die Datei im Ziel-Repo liegt. Die
+# beiden Faelle unten haetten VOR I-A beide faelschlich uebersprungen; jetzt
+# muessen sie normal hochladen.
+
+# 1) Repo-Typ-Check nicht erreichbar (STUB_REPOS_CURL_RC simuliert den
+# curl-Exit, den 'curl --fail' z.B. bei HTTP 403 liefert) UND der Index HAETTE
+# einen Treffer -> kein Skip, Upload laeuft, Hinweis erscheint. Genau 2
+# '--config'-Aufrufe (Repo-Check + Upload) belegen, dass der Index gar nicht
+# erst abgefragt wird.
+run_publish_checked unreachable NEXUS_USER=u NEXUS_PASS=p STUB_HTTP=204 \
+  STUB_REPOS_CURL_RC=22 \
+  STUB_INDEX_HTTP=200 \
+  STUB_INDEX_BODY="<a href=\"x\">${ARCHIVE_BASE}</a>"
+assert_rc "I-A: Repo-Typ nicht erreichbar + waere-Treffer -> rc 0" 0 "$PUB_RC"
+if grep -q 'SKIP:' <<<"$PUB_OUT"; then
+  nok "I-A: Repo-Typ nicht erreichbar + waere-Treffer -> KEIN Skip" "SKIP: in der Ausgabe gefunden"
+else ok "I-A: Repo-Typ nicht erreichbar + waere-Treffer -> KEIN Skip"; fi
+assert_contains "I-A: Repo-Typ nicht erreichbar -> OK-Meldung (Upload lief)" "$PUB_OUT" "OK:"
+assert_eq "I-A: Repo-Typ nicht erreichbar -> genau ein Upload-Aufruf" "1" "$PUB_UPLOADS"
+assert_contains "I-A: Repo-Typ nicht erreichbar -> Hinweis auf unbestaetigten Typ" \
+  "$PUB_OUT" "Repo-Typ nicht bestaetigt"
+assert_eq "I-A: Repo-Typ nicht erreichbar -> kein Index-Aufruf (nur Repo-Check + Upload)" \
+  "2" "$(grep -c '^--config$' <<<"$PUB_ARGS")"
+
+# 2) SKIP_REPO_CHECK=1 (der Repo-Typ-Check laeuft gar nicht erst) UND der
+# Index HAETTE ebenfalls einen Treffer -> dieselbe Erwartung. run_publish_index
+# setzt SKIP_REPO_CHECK=1 fest - vor I-A war das der Fall, der ueberspringen
+# sollte; jetzt ist es der Fall, der es NICHT mehr darf.
+run_publish_index skiprepocheck STUB_INDEX_HTTP=200 \
+  STUB_INDEX_BODY="<a href=\"x\">${ARCHIVE_BASE}</a>"
+assert_rc "I-A: SKIP_REPO_CHECK=1 + waere-Treffer -> rc 0" 0 "$PUB_RC"
+if grep -q 'SKIP:' <<<"$PUB_OUT"; then
+  nok "I-A: SKIP_REPO_CHECK=1 + waere-Treffer -> KEIN Skip" "SKIP: in der Ausgabe gefunden"
+else ok "I-A: SKIP_REPO_CHECK=1 + waere-Treffer -> KEIN Skip"; fi
+assert_eq "I-A: SKIP_REPO_CHECK=1 -> genau ein Upload-Aufruf" "1" "$PUB_UPLOADS"
+assert_contains "I-A: SKIP_REPO_CHECK=1 -> Hinweis auf unbestaetigten Typ" \
+  "$PUB_OUT" "Repo-Typ nicht bestaetigt"
+assert_eq "I-A: SKIP_REPO_CHECK=1 -> kein Index-Aufruf (nur Upload)" \
+  "1" "$(grep -c '^--config$' <<<"$PUB_ARGS")"
+
+echo
+echo "=== publish-pypi.sh Vorabpruefung (Simple-Index, bestaetigter Repo-Typ) ==="
+# Alle Faelle unten laufen mit bestaetigtem "hosted pypi"-Repo-Typ - sonst
+# wuerde already_published seit I-A gar nicht mehr bis zum Index-Aufruf
+# kommen und diese Faelle wuerden nichts mehr pruefen (siehe Kommentar bei
+# run_publish_index oben).
+
 # Achtung: rc 0 allein beweist hier nichts - der erfolgreiche Upload liefert
 # ebenfalls 0. Den Skip belegen die SKIP-Meldung UND $PUB_UPLOADS == 0.
-run_publish_index hit STUB_INDEX_HTTP=200 \
+run_publish_checked hit NEXUS_USER=u NEXUS_PASS=p STUB_REPOS_JSON="$STUB_REPOS_JSON_HOSTED_PYPI" \
+  STUB_INDEX_HTTP=200 \
   STUB_INDEX_BODY="<html><body><a href=\"../../packages/x/1/${ARCHIVE_BASE}#sha256=abc\">${ARCHIVE_BASE}</a></body></html>"
 assert_rc "Index-Treffer -> rc 0" 0 "$PUB_RC"
 assert_contains "Index-Treffer -> SKIP-Meldung" "$PUB_OUT" "SKIP:"
@@ -1287,6 +1372,13 @@ assert_eq "Index-Treffer -> kein Upload-Aufruf" "0" "$PUB_UPLOADS"
 # 'simple/mein-tolles-paket/' irgendwo in argv).
 assert_contains "Index-URL nutzt den PEP-503-Namen" "$PUB_ARGS" \
   "https://nexus.example.com/repository/pypi-hosted/simple/mein-tolles-paket/"
+# I-B: die Index-Abfrage ist eine Abkuerzung, die den Build nicht aufhalten
+# darf - beide Zeitgrenzen muessen in argv stehen, und zwar genau einmal (nur
+# beim Index-Aufruf, nicht bei Repo-Check oder Upload).
+assert_eq "I-B: Index-Abfrage hat --connect-timeout" "1" \
+  "$(grep -c '^--connect-timeout$' <<<"$PUB_ARGS")"
+assert_eq "I-B: Index-Abfrage hat --max-time" "1" \
+  "$(grep -c '^--max-time$' <<<"$PUB_ARGS")"
 
 # I-1: der Treffer steht als ERSTER Eintrag im Index, danach folgen weit mehr
 # als 1000 weitere Eintraege - gebaut nach demselben Muster wie
@@ -1306,13 +1398,15 @@ make_big_index_body() {  # <treffer-linktext> -> HTML auf stdout
     i=$((i+1))
   done
 }
-run_publish_index bigidx STUB_INDEX_HTTP=200 \
+run_publish_checked bigidx NEXUS_USER=u NEXUS_PASS=p STUB_REPOS_JSON="$STUB_REPOS_JSON_HOSTED_PYPI" \
+  STUB_INDEX_HTTP=200 \
   STUB_INDEX_BODY="$(make_big_index_body "$ARCHIVE_BASE")"
 assert_eq "I-1: Treffer vorne + >1000 Fuellzeilen -> kein Upload-Aufruf (Skip trotz grossem Index)" \
   "0" "$PUB_UPLOADS"
 assert_contains "I-1: grosser Index -> SKIP-Meldung" "$PUB_OUT" "SKIP:"
 
-run_publish_index miss STUB_INDEX_HTTP=200 \
+run_publish_checked miss NEXUS_USER=u NEXUS_PASS=p STUB_REPOS_JSON="$STUB_REPOS_JSON_HOSTED_PYPI" \
+  STUB_INDEX_HTTP=200 \
   STUB_INDEX_BODY="<a href=\"x\">ein-anderes-1.0.tar.gz</a>"
 assert_rc "Index ohne Treffer -> rc 0" 0 "$PUB_RC"
 assert_contains "Index ohne Treffer -> OK-Meldung" "$PUB_OUT" "OK:"
@@ -1320,7 +1414,8 @@ assert_eq "Index ohne Treffer -> genau ein Upload-Aufruf" "1" "$PUB_UPLOADS"
 
 # Exakter Vergleich statt Substring: '<datei>' darf nicht in '<datei>.asc'
 # gefunden werden.
-run_publish_index asc STUB_INDEX_HTTP=200 \
+run_publish_checked asc NEXUS_USER=u NEXUS_PASS=p STUB_REPOS_JSON="$STUB_REPOS_JSON_HOSTED_PYPI" \
+  STUB_INDEX_HTTP=200 \
   STUB_INDEX_BODY="<a href=\"x\">${ARCHIVE_BASE}.asc</a>"
 assert_eq "nur .asc gelistet -> kein Skip" "1" "$PUB_UPLOADS"
 assert_contains "nur .asc gelistet -> OK-Meldung" "$PUB_OUT" "OK:"
@@ -1330,7 +1425,8 @@ assert_contains "nur .asc gelistet -> OK-Meldung" "$PUB_OUT" "OK:"
 # Zeichen - der gelistete Eintrag unterscheidet sich vom gesuchten Namen nur
 # an einer Metazeichen-Position ('X' statt '.'). Mit -F darf das NICHT
 # treffen; mit -E wuerde es (faelschlich) treffen.
-run_publish_index metachar STUB_INDEX_HTTP=200 \
+run_publish_checked metachar NEXUS_USER=u NEXUS_PASS=p STUB_REPOS_JSON="$STUB_REPOS_JSON_HOSTED_PYPI" \
+  STUB_INDEX_HTTP=200 \
   STUB_INDEX_BODY="<a href=\"x\">${ARCHIVE_BASE/./X}</a>"
 assert_eq "M-4: nur an Metazeichen-Position abweichender Eintrag -> kein Skip" \
   "1" "$PUB_UPLOADS"
@@ -1342,7 +1438,8 @@ assert_contains "M-4: Metazeichen-Position -> OK-Meldung" "$PUB_OUT" "OK:"
 # 'foo-bar-baz', nicht 'foo--bar--baz'.
 ARCHIVE_DUPSEP="$(make_sdist idxdupsep 'Foo_.Bar--Baz' '1.0')"
 IDX_ARCHIVE="$ARCHIVE_DUPSEP"
-run_publish_index dupsep STUB_INDEX_HTTP=200 \
+run_publish_checked dupsep NEXUS_USER=u NEXUS_PASS=p STUB_REPOS_JSON="$STUB_REPOS_JSON_HOSTED_PYPI" \
+  STUB_INDEX_HTTP=200 \
   STUB_INDEX_BODY="<a href=\"x\">$(basename "$ARCHIVE_DUPSEP")</a>"
 assert_contains "M-3: wiederholte Trennzeichen werden zu einem '-' zusammengefasst" \
   "$PUB_ARGS" "https://nexus.example.com/repository/pypi-hosted/simple/foo-bar-baz/"
@@ -1354,28 +1451,32 @@ unset IDX_ARCHIVE
 ARCHIV_KAPUTT="${TMP}/kaputt.tar.gz"
 printf 'kein echtes tar.gz-Archiv' > "$ARCHIV_KAPUTT"
 IDX_ARCHIVE="$ARCHIV_KAPUTT"
-run_publish_index brokenname
+run_publish_checked brokenname NEXUS_USER=u NEXUS_PASS=p STUB_REPOS_JSON="$STUB_REPOS_JSON_HOSTED_PYPI"
 assert_contains "M-9: Paketname nicht lesbar -> Hinweis" "$PUB_OUT" "Paketname nicht lesbar"
 assert_eq "M-9: Paketname nicht lesbar -> Upload laeuft trotzdem" "1" "$PUB_UPLOADS"
 assert_rc "M-9: Paketname nicht lesbar -> rc 0" 0 "$PUB_RC"
 unset IDX_ARCHIVE
 
-run_publish_index notfound STUB_INDEX_HTTP=404
+run_publish_checked notfound NEXUS_USER=u NEXUS_PASS=p STUB_REPOS_JSON="$STUB_REPOS_JSON_HOSTED_PYPI" \
+  STUB_INDEX_HTTP=404
 assert_eq "Index 404 -> Upload laeuft" "1" "$PUB_UPLOADS"
 assert_rc "Index 404 -> rc 0" 0 "$PUB_RC"
 
-run_publish_index unauth STUB_INDEX_HTTP=401
+run_publish_checked unauth NEXUS_USER=u NEXUS_PASS=p STUB_REPOS_JSON="$STUB_REPOS_JSON_HOSTED_PYPI" \
+  STUB_INDEX_HTTP=401
 assert_eq "Index 401 -> Upload laeuft trotzdem" "1" "$PUB_UPLOADS"
 assert_contains "Index 401 -> Hinweis auf die uebersprungene Pruefung" "$PUB_OUT" "Vorabpruefung uebersprungen"
 assert_rc "Index 401 -> rc 0" 0 "$PUB_RC"
 
-run_publish_index idxfail STUB_INDEX_CURL_RC=7
+run_publish_checked idxfail NEXUS_USER=u NEXUS_PASS=p STUB_REPOS_JSON="$STUB_REPOS_JSON_HOSTED_PYPI" \
+  STUB_INDEX_CURL_RC=7
 assert_eq "curl-Fehler beim Index -> Upload laeuft" "1" "$PUB_UPLOADS"
 assert_contains "curl-Fehler beim Index -> Hinweis" "$PUB_OUT" "Vorabpruefung uebersprungen"
 
 # Der 400-Pfad faengt ab, was die Vorabpruefung verpasst hat (Rennen zweier
 # Builds, oder Index nicht abfragbar) - und ueberspringt jetzt ebenfalls.
-run_publish_index dup400 STUB_INDEX_HTTP=404 STUB_HTTP=400 \
+run_publish_checked dup400 NEXUS_USER=u NEXUS_PASS=p STUB_REPOS_JSON="$STUB_REPOS_JSON_HOSTED_PYPI" \
+  STUB_INDEX_HTTP=404 STUB_HTTP=400 \
   STUB_BODY='{"message":"Repository does not allow updating assets"}'
 assert_rc "400 trotz Vorabpruefung -> rc 0" 0 "$PUB_RC"
 assert_contains "400 trotz Vorabpruefung -> SKIP-Meldung" "$PUB_OUT" "SKIP:"

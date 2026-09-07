@@ -103,6 +103,13 @@ cfg_credentials() {
 # --- Schutz vor dem Klassiker: Upload gegen ein Group-Repo -------------------
 # Die REST-API sagt uns den Typ. Ist sie nicht erreichbar (fehlende Rechte),
 # wird nur gewarnt statt abzubrechen.
+#
+# REPO_TYPE_BESTAETIGT haelt fest, ob dieser Check wirklich "hosted pypi"
+# GESEHEN hat - nicht nur, dass er ohne Exit-3-Fehler durchgelaufen ist. Die
+# Vorabpruefung (already_published) braucht genau dieses staerkere Signal
+# (I-A): ein "nicht pruefbar" oder ein "in der API nicht gefunden" ist hier
+# bewusst kein Fehler, darf aber auch keine Abkuerzung anderswo freischalten.
+REPO_TYPE_BESTAETIGT=0
 check_repo_type() {
   local json type
   json=$(cfg_credentials \
@@ -128,7 +135,7 @@ for r in json.load(sys.stdin):
     "proxy "*)
       echo "FEHLER: '${NEXUS_PYPI_HOSTED}' ist ein PROXY-Repo, kein hosted." >&2
       exit 3 ;;
-    "hosted pypi") : ;;
+    "hosted pypi") REPO_TYPE_BESTAETIGT=1 ;;
     "hosted "*)
       echo "FEHLER: '${NEXUS_PYPI_HOSTED}' ist hosted, aber kein PyPI-Format (${type})." >&2
       exit 3 ;;
@@ -152,8 +159,26 @@ normalize_name() {
 # normal hochgeladen. Ein Duplikat faengt dann der 400-Pfad ab, der ebenfalls
 # ueberspringt. Eine nicht durchfuehrbare Pruefung darf den Build nicht rot
 # machen - dieselbe Logik wie beim Repo-Typ-Check.
+#
+# I-A: diese Abkuerzung darf nur greifen, wenn check_repo_type den Typ VORHER
+# bestaetigt hat (REPO_TYPE_BESTAETIGT=1, siehe dort). Grund: zeigt
+# NEXUS_PYPI_HOSTED faelschlich auf ein Group-Repo, aggregiert dessen
+# Simple-Index die Member - auch einen PyPI-Proxy. Ein Treffer dort sagt dann
+# nichts darueber aus, ob die Datei im eigentlichen Ziel-Repo liegt; ohne die
+# Bestaetigung waere das ein stiller FALSCHER Skip (rc 0, kein Upload, nichts
+# publiziert). Ist der Typ nicht bestaetigt (SKIP_REPO_CHECK=1, REST-API nicht
+# erreichbar, Repo nicht gefunden), wird deshalb gar nicht erst abgefragt - der
+# Upload laeuft normal, ein echtes Duplikat faengt weiterhin der 400-Pfad ab.
 already_published() {
   local name normalized url http body rc member links
+
+  if [[ "${REPO_TYPE_BESTAETIGT}" != "1" ]]; then
+    echo "HINWEIS: Repo-Typ nicht bestaetigt - Vorabpruefung uebersprungen (ein" >&2
+    echo "         Group-Index wuerde Member aggregieren; ein Treffer dort waere" >&2
+    echo "         kein verlaesslicher Beleg fuer das Ziel-Repo)" >&2
+    return 1
+  fi
+
   name="$(bash "${SCRIPT_DIR}/sdist-meta.sh" "$ARCHIVE" name)" || {
     echo "HINWEIS: Paketname nicht lesbar - Vorabpruefung uebersprungen" >&2
     return 1
@@ -163,8 +188,14 @@ already_published() {
 
   IDX_BODY_FILE="$(mktemp)"
   set +e
+  # --connect-timeout/--max-time (I-B): diese Abfrage ist eine Abkuerzung, die
+  # scheitern darf (siehe oben) - sie darf den Build dann aber auch nicht
+  # aufhalten. Kurze Werte: 10s fuer den Verbindungsaufbau, 30s insgesamt
+  # reichen fuer einen Simple-Index-Abruf bei Weitem und liegen deutlich unter
+  # dem, was als "haengender Build" auffiele.
   http="$(cfg_credentials \
           | curl --config - --silent --show-error \
+                 --connect-timeout 10 --max-time 30 \
                  --output "$IDX_BODY_FILE" --write-out '%{http_code}' \
                  "$url" 2>/dev/null)"
   rc=$?

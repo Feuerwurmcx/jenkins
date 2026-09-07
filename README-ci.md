@@ -317,6 +317,10 @@ Hat ein Repo **beides** - Metadaten in der Wurzel und Paketordner darunter -,
 gewinnt die Wurzel: es gilt als ein Paket. Wer das nicht will, setzt
 `packages` ausdruecklich; eine feste Liste gewinnt immer.
 
+Bei einem Einzelpaket-Repo meint `packages = '.'` das Wurzelpaket selbst und
+ist erlaubt: jede geaenderte Datei zaehlt dafuer, genau wie bei der
+Auto-Erkennung.
+
 Wird gar kein Paket erkannt, meldet `changed-packages.sh` das auf stderr:
 
     HINWEIS: keine Paketordner und keine Paket-Metadaten in der Repo-Wurzel

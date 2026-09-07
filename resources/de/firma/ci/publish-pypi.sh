@@ -81,6 +81,15 @@ UPLOAD_URL="${BASE}/service/rest/v1/components?repository=${NEXUS_PYPI_HOSTED}"
 # das .ci-lib auf dem Agent, lokal resources/de/firma/ci.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Temp-Dateien fuer Vorabpruefung und Upload. Der EXIT-trap wird hier
+# registriert, VOR dem ersten 'mktemp' (das steht in already_published(),
+# aufgerufen weiter unten) - sonst bliebe bei einem Signal waehrend der
+# Index-Abfrage eine Temp-Datei liegen (M-6).
+BODY_FILE=""
+ERR_FILE=""
+IDX_BODY_FILE=""
+trap 'rm -f "$BODY_FILE" "$ERR_FILE" "$IDX_BODY_FILE"' EXIT
+
 # --- Zugangsdaten ------------------------------------------------------------
 # Im curl-Config-Format sind " und \ Sonderzeichen. Ohne Escaping bricht ein
 # Passwort mit Anführungszeichen den Aufruf – beim Repo-Check still (er
@@ -144,7 +153,7 @@ normalize_name() {
 # ueberspringt. Eine nicht durchfuehrbare Pruefung darf den Build nicht rot
 # machen - dieselbe Logik wie beim Repo-Typ-Check.
 already_published() {
-  local name normalized url http body body_file rc member
+  local name normalized url http body rc member links
   name="$(bash "${SCRIPT_DIR}/sdist-meta.sh" "$ARCHIVE" name)" || {
     echo "HINWEIS: Paketname nicht lesbar - Vorabpruefung uebersprungen" >&2
     return 1
@@ -152,16 +161,17 @@ already_published() {
   normalized="$(normalize_name "$name")"
   url="${BASE}/repository/${NEXUS_PYPI_HOSTED}/simple/${normalized}/"
 
-  body_file="$(mktemp)"
+  IDX_BODY_FILE="$(mktemp)"
   set +e
   http="$(cfg_credentials \
           | curl --config - --silent --show-error \
-                 --output "$body_file" --write-out '%{http_code}' \
+                 --output "$IDX_BODY_FILE" --write-out '%{http_code}' \
                  "$url" 2>/dev/null)"
   rc=$?
   set -e
-  body="$(cat "$body_file")"
-  rm -f "$body_file"
+  body="$(cat "$IDX_BODY_FILE")"
+  rm -f "$IDX_BODY_FILE"
+  IDX_BODY_FILE=""
 
   if [[ $rc -ne 0 ]]; then
     echo "HINWEIS: Simple-Index nicht abfragbar (curl-Exit ${rc}) - Vorabpruefung uebersprungen" >&2
@@ -176,8 +186,17 @@ already_published() {
 
   # Link-Texte aus dem Index ziehen und EXAKT vergleichen. Ein Substring-Test
   # wuerde '<datei>' faelschlich in einem gelisteten '<datei>.asc' finden.
+  #
+  # Wie in sdist-meta.sh/build-sdist.sh: erst VOLLSTAENDIG in eine Variable
+  # lesen, danach nur noch mit einem Herestring (<<<) filtern, statt zu pipen.
+  # Unter 'set -o pipefail' wuerde 'sed ... | grep -qxF ...' mit "Write error:
+  # Broken pipe" (rc 141) abbrechen, sobald grep beim ersten Treffer aussteigt
+  # und die Pipe schliesst, waehrend sed (bei einem grossen Index) noch
+  # weiterschreiben will - pipefail liefert dann 141 statt grep's 0, und
+  # already_published meldet faelschlich "nicht gefunden" (I-1).
   member="$(basename "$ARCHIVE")"
-  tr '<' '\n' <<<"$body" | sed -n 's/^[aA] [^>]*>//p' | grep -qxF "$member"
+  links="$(tr '<' '\n' <<<"$body" | sed -n 's/^[aA] [^>]*>//p')"
+  grep -qxF "$member" <<<"$links"
 }
 
 if already_published; then
@@ -188,8 +207,9 @@ fi
 # --- Upload -----------------------------------------------------------------
 echo "Upload -> ${UPLOAD_URL}  ($(basename "$ARCHIVE"))"
 
+# Der EXIT-trap wurde bereits weiter oben registriert (vor dem ersten mktemp
+# in already_published()) und deckt BODY_FILE/ERR_FILE mit ab (M-6).
 BODY_FILE="$(mktemp)"
-trap 'rm -f "$BODY_FILE" "${ERR_FILE:-}"' EXIT
 ERR_FILE="$(mktemp)"
 
 # Status per --write-out getrennt vom Body: so steht der Exit-Grund fest, statt

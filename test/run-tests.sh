@@ -198,10 +198,17 @@ for a in "$@"; do
   prev="$a"
 done
 
+# Reihenfolge ist wichtig (M-7): die Upload-Erkennung ('v1/components' mit
+# '?repository=') steht VOR dem generischen '*/simple/*'-Muster. Sonst wuerde
+# eine Upload-URL, deren NEXUS_PYPI_HOSTED zufaellig 'simple' enthaelt (z.B.
+# 'a/simple/b'), faelschlich als Index-Abfrage erkannt - die Muster
+# ueberlappen sich, weil der Repo-Name Teil der Query-String ist.
 case "$url" in
   */service/rest/v1/repositories)
     printf '%s' "${STUB_REPOS_JSON:-[]}"
     exit 0 ;;
+  */service/rest/v1/components\?repository=*)
+    ;;  # Upload - faellt durch zum Code unterhalb dieses case-Blocks
   */simple/*)
     # Default 404: Paket unbekannt -> alle Bestandstests laden weiterhin hoch.
     if [[ -n "$out" ]]; then printf '%s' "${STUB_INDEX_BODY:-}" > "$out"; fi
@@ -995,7 +1002,15 @@ assert_contains "POST wird verwendet" "$PUB_ARGS" "POST"
 # Q-2: der Stub druckt den HTTP-Status nur, wenn --write-out in argv steht -
 # ohne diese Assertion bliebe ein versehentlich gestrichenes --write-out
 # unbemerkt gruen (der *-Zweig sieht dann ein leeres $HTTP).
-assert_contains "Status wird per --write-out geholt" "$PUB_ARGS" '%{http_code}'
+# M-1: seit der Vorabpruefung enthaelt $PUB_ARGS die argv ALLER curl-Aufrufe
+# dieses Laufs (Index + Upload), und die Index-Abfrage fuehrt '--write-out'
+# selbst mit. Ein assert_contains auf den blossen Substring waere deshalb
+# wirkungslos - er bliebe gruen, selbst wenn NUR der Upload-Aufruf das Flag
+# verliert. Stattdessen auf zwei Vorkommen zaehlen (Index-Aufruf plus
+# Upload-Aufruf; SKIP_REPO_CHECK=1 ist hier gesetzt, der Repo-Typ-Check
+# entfaellt also).
+assert_eq "Status wird per --write-out geholt (Index- und Upload-Aufruf)" "2" \
+  "$(grep -c '^%{http_code}$' <<<"$PUB_ARGS")"
 # I-2: der Testkatalog der Spec versprach einen Fall "SKIP_REPO_CHECK=1
 # ueberspringt den Repo-Typ-Check (nur ein curl-Aufruf)", den es bisher nicht
 # gab. Jeder curl-Aufruf traegt genau ein '--config'-Argument (die Config kommt
@@ -1013,11 +1028,18 @@ run_publish dup NEXUS_USER=u NEXUS_PASS=p STUB_HTTP=400 \
   STUB_BODY='{"message":"Repository does not allow updating assets"}'
 assert_rc "400 + does not allow updating -> rc 0 (uebersprungen)" 0 "$PUB_RC"
 assert_contains "400 + does not allow updating -> SKIP-Meldung" "$PUB_OUT" "SKIP:"
+# M-5: "SKIP:" allein ist identisch mit der SKIP-Meldung der Vorabpruefung -
+# beide Pfade sind an dieser Zeichenkette nicht zu unterscheiden. Erst der
+# Klammerzusatz belegt, dass wirklich der 400-Duplikat-Pfad gegriffen hat.
+assert_contains "400 + does not allow updating -> Herkunft ist der 400-Pfad" \
+  "$PUB_OUT" "(Nexus meldete HTTP 400)"
 
 run_publish dup2 NEXUS_USER=u NEXUS_PASS=p STUB_HTTP=400 \
   STUB_BODY='package alpha-1.0.tar.gz already exists'
 assert_rc "400 + already exists -> rc 0 (uebersprungen)" 0 "$PUB_RC"
 assert_contains "400 + already exists -> SKIP-Meldung" "$PUB_OUT" "SKIP:"
+assert_contains "400 + already exists -> Herkunft ist der 400-Pfad" \
+  "$PUB_OUT" "(Nexus meldete HTTP 400)"
 
 run_publish bad400 NEXUS_USER=u NEXUS_PASS=p STUB_HTTP=400 \
   STUB_BODY='Malformed component'
@@ -1143,11 +1165,12 @@ run_publish_checked okpypi NEXUS_USER=u NEXUS_PASS=geheim-checked-nicht-in-argv 
   STUB_REPOS_JSON='[{"name":"pypi-hosted","type":"hosted","format":"pypi"}]'
 assert_rc "Repo-Check: hosted/pypi -> rc 0, Upload laeuft" 0 "$PUB_RC"
 assert_contains "Repo-Check: hosted/pypi -> OK-Meldung (Upload lief)" "$PUB_OUT" "OK:"
-# Gilt fuer BEIDE curl-Aufrufe (Repo-Check und Upload) - derselbe Gegentest wie
-# beim reinen Upload, hier aber ueber den kompletten Pfad mit Repo-Check davor.
+# Gilt fuer ALLE DREI curl-Aufrufe (Repo-Check, Index und Upload) - derselbe
+# Gegentest wie beim reinen Upload, hier aber ueber den kompletten Pfad mit
+# Repo-Check und Vorabpruefung davor.
 if grep -q 'geheim-checked-nicht-in-argv' <<<"$PUB_ARGS"; then
-  nok "Repo-Check: Passwort steht NICHT in argv (beide Aufrufe)" "gefunden in curl-args"
-else ok "Repo-Check: Passwort steht NICHT in argv (beide Aufrufe)"; fi
+  nok "Repo-Check: Passwort steht NICHT in argv (alle drei Aufrufe)" "gefunden in curl-args"
+else ok "Repo-Check: Passwort steht NICHT in argv (alle drei Aufrufe)"; fi
 # I-2: Gegenstueck zum SKIP_REPO_CHECK=1-Fall oben (dort zwei curl-Aufrufe) -
 # ohne die Variable laufen Repo-Typ-Check, Vorabpruefung UND Upload, also drei
 # curl-Aufrufe (je ein '--config'-Argument).
@@ -1233,8 +1256,11 @@ ARCHIVE_BASE="$(basename "$ARCHIVE")"
 # Nutzung: run_publish_index <unterordner> [VAR=wert ...]
 # Ergebnis in $PUB_OUT, $PUB_RC, $PUB_ARGS, $PUB_UPLOADS (Zahl der
 # Upload-Aufrufe - daran haengt der Nachweis, dass wirklich uebersprungen wird).
+# $IDX_ARCHIVE ueberschreibt, welches Archiv publiziert wird (Default $ARCHIVE)
+# - fuer Faelle, die einen anderen Paketnamen oder ein kaputtes Archiv
+# brauchen (M-3, M-9), ohne den Helfer selbst umzubauen.
 run_publish_index() {
-  local sub="$1"; shift
+  local sub="$1" archive="${IDX_ARCHIVE:-$ARCHIVE}"; shift
   PUB_D="${TMP}/pubidx-${sub}"
   rm -rf "$PUB_D"; mkdir -p "$PUB_D"
   PUB_OUT="$(env "$@" PATH="${CURL_BIN}:${PATH}" STUB_DIR="$PUB_D" \
@@ -1242,7 +1268,7 @@ run_publish_index() {
              NEXUS_URL=https://nexus.example.com \
              NEXUS_PYPI_HOSTED=pypi-hosted \
              NEXUS_USER=u NEXUS_PASS=p \
-             bash "$SCRIPTS/publish-pypi.sh" "$ARCHIVE" 2>&1)"
+             bash "$SCRIPTS/publish-pypi.sh" "$archive" 2>&1)"
   PUB_RC=$?
   PUB_ARGS="$(cat "${PUB_D}/curl-args" 2>/dev/null || true)"
   PUB_UPLOADS="$(grep -c 'service/rest/v1/components' <<<"$PUB_ARGS" || true)"
@@ -1255,7 +1281,36 @@ run_publish_index hit STUB_INDEX_HTTP=200 \
 assert_rc "Index-Treffer -> rc 0" 0 "$PUB_RC"
 assert_contains "Index-Treffer -> SKIP-Meldung" "$PUB_OUT" "SKIP:"
 assert_eq "Index-Treffer -> kein Upload-Aufruf" "0" "$PUB_UPLOADS"
-assert_contains "Index-URL nutzt den PEP-503-Namen" "$PUB_ARGS" "simple/mein-tolles-paket/"
+# M-2: die volle URL pruefen, nicht nur den Schwanz - sonst bliebe grün, wenn
+# '/repository/${NEXUS_PYPI_HOSTED}/' aus dem URL-Aufbau verschwaende (die
+# Abfrage liefe dann gegen einen falschen Pfad, faende aber zufaellig noch
+# 'simple/mein-tolles-paket/' irgendwo in argv).
+assert_contains "Index-URL nutzt den PEP-503-Namen" "$PUB_ARGS" \
+  "https://nexus.example.com/repository/pypi-hosted/simple/mein-tolles-paket/"
+
+# I-1: der Treffer steht als ERSTER Eintrag im Index, danach folgen weit mehr
+# als 1000 weitere Eintraege - gebaut nach demselben Muster wie
+# make_big_sdist() fuer den verwandten tar/sed-Fall. Das baut den Index gross
+# genug auf, um den SIGPIPE-Abbruch unter 'pipefail' zu reproduzieren: wenn
+# 'sed ... | grep -qxF ...' noch als Pipe stuende, wuerde grep beim (ersten)
+# Treffer aussteigen und die Pipe schliessen, waehrend sed noch Hunderte
+# Fuellzeilen nachschieben will - sed stirbt dann an SIGPIPE (rc 141), und
+# 'pipefail' macht daraus den Pipeline-Status, obwohl grep selbst 0
+# geliefert hatte. already_published wuerde faelschlich "nicht gefunden"
+# melden und der Upload liefe trotz vorhandener Datei.
+make_big_index_body() {  # <treffer-linktext> -> HTML auf stdout
+  local hit="$1" i=0
+  printf '<a href="x">%s</a>' "$hit"
+  while [[ $i -lt 1200 ]]; do
+    printf '<a href="x">anderes-fuellpaket-%d.tar.gz</a>' "$i"
+    i=$((i+1))
+  done
+}
+run_publish_index bigidx STUB_INDEX_HTTP=200 \
+  STUB_INDEX_BODY="$(make_big_index_body "$ARCHIVE_BASE")"
+assert_eq "I-1: Treffer vorne + >1000 Fuellzeilen -> kein Upload-Aufruf (Skip trotz grossem Index)" \
+  "0" "$PUB_UPLOADS"
+assert_contains "I-1: grosser Index -> SKIP-Meldung" "$PUB_OUT" "SKIP:"
 
 run_publish_index miss STUB_INDEX_HTTP=200 \
   STUB_INDEX_BODY="<a href=\"x\">ein-anderes-1.0.tar.gz</a>"
@@ -1269,6 +1324,41 @@ run_publish_index asc STUB_INDEX_HTTP=200 \
   STUB_INDEX_BODY="<a href=\"x\">${ARCHIVE_BASE}.asc</a>"
 assert_eq "nur .asc gelistet -> kein Skip" "1" "$PUB_UPLOADS"
 assert_contains "nur .asc gelistet -> OK-Meldung" "$PUB_OUT" "OK:"
+
+# M-4: dass exakt/fixed-string verglichen wird (grep -qxF), nicht als Regex
+# (grep -qxE). Als Regex waere '.' ein Platzhalter fuer ein beliebiges
+# Zeichen - der gelistete Eintrag unterscheidet sich vom gesuchten Namen nur
+# an einer Metazeichen-Position ('X' statt '.'). Mit -F darf das NICHT
+# treffen; mit -E wuerde es (faelschlich) treffen.
+run_publish_index metachar STUB_INDEX_HTTP=200 \
+  STUB_INDEX_BODY="<a href=\"x\">${ARCHIVE_BASE/./X}</a>"
+assert_eq "M-4: nur an Metazeichen-Position abweichender Eintrag -> kein Skip" \
+  "1" "$PUB_UPLOADS"
+assert_contains "M-4: Metazeichen-Position -> OK-Meldung" "$PUB_OUT" "OK:"
+
+# M-3: PEP-503-Normalisierung fasst WIEDERHOLTE Trennzeichen zu einem '-'
+# zusammen. $ARCHIVE ('Mein.Tolles_Paket') hat keine doppelten Trennzeichen -
+# ein zweites Archiv mit Name 'Foo_.Bar--Baz' deckt das ab: erwartet wird
+# 'foo-bar-baz', nicht 'foo--bar--baz'.
+ARCHIVE_DUPSEP="$(make_sdist idxdupsep 'Foo_.Bar--Baz' '1.0')"
+IDX_ARCHIVE="$ARCHIVE_DUPSEP"
+run_publish_index dupsep STUB_INDEX_HTTP=200 \
+  STUB_INDEX_BODY="<a href=\"x\">$(basename "$ARCHIVE_DUPSEP")</a>"
+assert_contains "M-3: wiederholte Trennzeichen werden zu einem '-' zusammengefasst" \
+  "$PUB_ARGS" "https://nexus.example.com/repository/pypi-hosted/simple/foo-bar-baz/"
+unset IDX_ARCHIVE
+
+# M-9: der Zweig "Paketname nicht lesbar" (sdist-meta.sh scheitert an einem
+# kaputten Archiv) war bisher ungetestet. Muss wie jeder andere
+# Vorabpruefungs-Fehler nur warnen, nicht abbrechen: Upload laeuft, rc 0.
+ARCHIV_KAPUTT="${TMP}/kaputt.tar.gz"
+printf 'kein echtes tar.gz-Archiv' > "$ARCHIV_KAPUTT"
+IDX_ARCHIVE="$ARCHIV_KAPUTT"
+run_publish_index brokenname
+assert_contains "M-9: Paketname nicht lesbar -> Hinweis" "$PUB_OUT" "Paketname nicht lesbar"
+assert_eq "M-9: Paketname nicht lesbar -> Upload laeuft trotzdem" "1" "$PUB_UPLOADS"
+assert_rc "M-9: Paketname nicht lesbar -> rc 0" 0 "$PUB_RC"
+unset IDX_ARCHIVE
 
 run_publish_index notfound STUB_INDEX_HTTP=404
 assert_eq "Index 404 -> Upload laeuft" "1" "$PUB_UPLOADS"
@@ -1289,6 +1379,8 @@ run_publish_index dup400 STUB_INDEX_HTTP=404 STUB_HTTP=400 \
   STUB_BODY='{"message":"Repository does not allow updating assets"}'
 assert_rc "400 trotz Vorabpruefung -> rc 0" 0 "$PUB_RC"
 assert_contains "400 trotz Vorabpruefung -> SKIP-Meldung" "$PUB_OUT" "SKIP:"
+assert_contains "400 trotz Vorabpruefung -> Herkunft ist der 400-Pfad" \
+  "$PUB_OUT" "(Nexus meldete HTTP 400)"
 
 skip "publish-pypi.sh echter Netzwerk-Upload" "braucht ein erreichbares Nexus - bewusst nicht getestet"
 

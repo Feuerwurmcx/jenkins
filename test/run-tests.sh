@@ -299,6 +299,25 @@ make_root_repo() {  # -> Pfad auf stdout
   printf '%s\n' "$d"
 }
 
+# Wie make_root_repo, aber der Wurzelinhalt geht in setup.cfg statt
+# pyproject.toml - fuer die Inhaltspruefung von setup.cfg (I-1/I-2).
+#   make_root_setupcfg_repo <unterordner> <inhalt der setup.cfg oder "">
+make_root_setupcfg_repo() {  # -> Pfad auf stdout
+  local d="${TMP}/rootrepo-$1"; shift
+  rm -rf "$d"; mkdir -p "$d/alpha"
+  echo "from setuptools import setup" > "$d/alpha/setup.py"
+  if [[ -n "${1:-}" ]]; then printf '%s\n' "$1" > "$d/setup.cfg"; fi
+  (
+    cd "$d"
+    git init -q -b main
+    git config user.email test@example.com
+    git config user.name Test
+    git add -A
+    git commit -q -m init
+  ) >/dev/null
+  printf '%s\n' "$d"
+}
+
 echo "=== Syntax ==="
 for f in "$SCRIPTS"/*.sh "${ROOT}/test/run-tests.sh"; do
   if bash -n "$f" 2>/dev/null; then ok "bash -n $(basename "$f")"
@@ -1551,6 +1570,19 @@ RSETUP="$(make_root_repo setuppy "")"
 assert_eq "Wurzel mit setup.py -> ." "." \
   "$(cd "$RSETUP" && $CP '' 2>/dev/null)"
 
+# I-1/I-2: eine Wurzel-setup.cfg mit nur Linter-Konfiguration ist in
+# Python-Monorepos verbreitet und darf kein Einzelpaket erzwingen.
+RCFGFLAKE="$(make_root_setupcfg_repo cfgflake8 '[flake8]
+max-line-length = 100')"
+assert_eq "Wurzel-setup.cfg nur [flake8] -> weiter Monorepo" "alpha" \
+  "$(cd "$RCFGFLAKE" && $CP '' 2>/dev/null)"
+
+# Erst [metadata] bzw. [options] macht aus setup.cfg Paket-Metadaten.
+RCFGMETA="$(make_root_setupcfg_repo cfgmeta '[metadata]
+name = m')"
+assert_eq "Wurzel-setup.cfg mit [metadata] -> ." "." \
+  "$(cd "$RCFGMETA" && $CP '' 2>/dev/null)"
+
 RPOETRY="$(make_root_repo poetry '[tool.poetry]
 name = "p"
 version = "1.0"')"
@@ -1569,6 +1601,18 @@ dev = ["pytest"]')"
 assert_eq "nur [project.optional-dependencies] -> zaehlt nicht" "alpha" \
   "$(cd "$ROPT" && $CP '' 2>/dev/null)"
 
+# Mi-1: das Muster darf gueltiges TOML nicht verwerfen - weder ein Kommentar
+# hinter der Abschnittsklammer noch Leerraum innerhalb der Klammern.
+RCOMMENT="$(make_root_repo comment '[project]  # Kommentar
+name = "c"')"
+assert_eq "Wurzel mit [project]  # Kommentar -> ." "." \
+  "$(cd "$RCOMMENT" && $CP '' 2>/dev/null)"
+
+RSPACED="$(make_root_repo spaced '[ project ]
+name = "s"')"
+assert_eq "Wurzel mit [ project ] -> ." "." \
+  "$(cd "$RSPACED" && $CP '' 2>/dev/null)"
+
 # Mischform: Wurzel-[project] UND ein Paketordner -> die Wurzel gewinnt.
 RMIX="$(make_root_repo mixed '[project]
 name = "m"
@@ -1579,6 +1623,13 @@ assert_eq "Mischform -> Wurzel gewinnt" "." \
 # PACKAGES gewinnt auch gegen die Wurzelerkennung.
 assert_eq "PACKAGES gewinnt gegen die Wurzelerkennung" "alpha" \
   "$(cd "$RMIX" && PACKAGES='alpha' $CP '' 2>/dev/null)"
+
+# I-3: PACKAGES-Vorrang im Schnittmengen-Zweig (nicht in all_packages()) -
+# braucht Wurzelpaket-Metadaten UND einen Paketordner UND eine brauchbare
+# Basis, damit der Code ueberhaupt in den Schnittmengen-Zweig laeuft.
+( cd "$RMIX" && echo "x" >> alpha/setup.py && git add -A && git commit -q -m "alpha-aenderung" )
+assert_eq "Wurzelpaket + alpha/ geaendert, PACKAGES=alpha -> alpha" "alpha" \
+  "$(cd "$RMIX" && PACKAGES='alpha' $CP HEAD~1 2>/dev/null)"
 
 # Repo ganz ohne Paket: leere Ausgabe UND ein Hinweis - der stille Leerlauf
 # war der eigentliche Fehler.

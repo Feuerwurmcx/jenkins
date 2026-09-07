@@ -33,12 +33,31 @@ BASE="${1:-}"
 # Bei pyproject.toml genuegt die blosse Datei nicht: sie enthaelt oft nur
 # Werkzeugkonfiguration ([tool.black], [tool.ruff]) und steht dann auch in
 # einem echten Monorepo in der Wurzel. Erst ein [project]- oder
-# [tool.poetry]-Abschnitt macht daraus ein Distributionspaket. Die Muster sind
-# verankert, damit [project.optional-dependencies] allein nicht zaehlt.
+# [tool.poetry]-Abschnitt macht daraus ein Distributionspaket. Das Muster ist
+# verankert (^...$), erlaubt aber Leerraum um den Abschnittsnamen und einen
+# Kommentar dahinter, damit gueltiges TOML wie "[project]  # Kommentar" oder
+# "[ project ]" erkannt wird - waehrend "[project.optional-dependencies]"
+# weiterhin NICHT zaehlt (dort folgt auf "project" kein "]", sondern ".").
+# Bekannte Grenze, bewusst nicht behoben: ein "[project]" als Text innerhalb
+# eines mehrzeiligen TOML-Strings wuerde faelschlich mitgezaehlt - sauber nur
+# mit einem echten TOML-Parser loesbar.
+#
+# Bei setup.cfg gilt dieselbe Ueberlegung wie bei pyproject.toml: eine
+# Wurzel-setup.cfg mit nur Linter-Konfiguration ([flake8], [mypy], ...) ist in
+# Python-Monorepos verbreitet und darf ein Monorepo nicht faelschlich zum
+# Einzelpaket machen. Erst ein [metadata]- oder [options]-Abschnitt macht
+# daraus Paket-Metadaten, das Muster ist verankert wie bei pyproject.toml.
+# setup.py bleibt dagegen bewusst OHNE Inhaltspruefung: anders als setup.cfg
+# oder pyproject.toml hat eine setup.py in der Wurzel praktisch keinen
+# verbreiteten Nur-Werkzeugkonfiguration-Zweck - sie existiert so gut wie
+# immer, um ein Paket zu bauen.
 root_is_package() {
-  [[ -f setup.py || -f setup.cfg ]] && return 0
+  [[ -f setup.py ]] && return 0
+  if [[ -f setup.cfg ]] && grep -qE '^[[:space:]]*\[(metadata|options)\][[:space:]]*$' setup.cfg; then
+    return 0
+  fi
   [[ -f pyproject.toml ]] || return 1
-  grep -qE '^[[:space:]]*\[(project|tool\.poetry)\][[:space:]]*$' pyproject.toml
+  grep -qE '^[[:space:]]*\[[[:space:]]*(project|tool\.poetry)[[:space:]]*\][[:space:]]*(#.*)?$' pyproject.toml
 }
 
 all_packages() {

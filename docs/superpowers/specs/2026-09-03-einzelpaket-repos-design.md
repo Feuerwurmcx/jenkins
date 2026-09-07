@@ -182,3 +182,58 @@ Gueltige Syntax wie `[ project ]` oder `[metadata]  # Kommentar` - TOML und
 configparser erlauben beides - fiel sonst lautlos durch, mit derselben
 gefaehrlichen Richtung wie der stille Leerlauf: ein echtes Einzelpaket haette
 niemand gebaut.
+
+---
+
+## Nachtrag 2026-09-07: die Erkennung entfaellt, ein Schalter entscheidet
+
+Diese Entscheidung hebt den Kern der Spec und den Nachtrag darueber auf. Alles
+zur **Erkennung** von Wurzel-Metadaten - die Regel in Zeile 36, 54 und 57-58,
+die Inhaltspruefung von `setup.cfg` und `pyproject.toml`, die Mischform-Regel
+"die Wurzel gewinnt" - ist ersatzlos gestrichen. Der Rest der Spec (Paketname
+`.`, jede geaenderte Datei zaehlt, Stage-Label `Wurzelpaket`, Logzeile
+`Repo-Wurzel ->`) gilt unveraendert weiter.
+
+**An die Stelle der Erkennung tritt ein ausdruecklicher Schalter:**
+
+* `rootPackage` als Konfiguration der Vollpipeline und als Argument von
+  `build()`,
+* der Build-Parameter `ROOT_PACKAGE` als Fallback, wenn die einbettende
+  Pipeline ihn hat,
+* die Umgebungsvariable `ROOT_PACKAGE` fuer `changed-packages.sh` selbst.
+
+Ist er gesetzt, ist die Paketliste genau `.`, und die Ordnersuche entfaellt.
+Ist er nicht gesetzt, sucht das Skript ausschliesslich Top-Level-Paketordner -
+eine Wurzel-`pyproject.toml` bleibt dann folgenlos, egal was darin steht.
+
+**Begruendung.** Ob eine Wurzel-`pyproject.toml` ein Distributionspaket
+beschreibt oder nur Werkzeugkonfiguration eines Monorepos ist, laesst sich mit
+Textmustern nicht zuverlaessig entscheiden; ein echter TOML-Parser steht auf
+dem Agent nicht zur Verfuegung. Der Abschluss-Review hat drei Faelle belegt,
+in denen die Erkennung falsch lag: ein `[project]` in einem mehrzeiligen
+TOML-String, ein `[metadata]` in einer configparser-Fortsetzungszeile und eine
+Wurzel-`setup.py` als Dev-Shim eines Monorepos. Beide Fehlrichtungen sind
+teuer - ein faelschlich als Einzelpaket erkanntes Monorepo verliert alle seine
+Pakete, ein nicht erkanntes Einzelpaket baut gar nichts, beides ohne
+Fehlermeldung. Wer sein Repo kennt, beantwortet die Frage in einer Zeile
+Konfiguration; das Skript kann sie nicht beantworten.
+
+**Zwei Faelle brechen ab statt still das Falsche zu tun** (Exit 2, damit
+`sh(returnStdout: true)` laut scheitert):
+
+1. Ein Wert, der weder wahr noch falsch ist. Erlaubt sind `true`/`1`/`yes`/
+   `on`/`ja` und `false`/`0`/`no`/`off`/`nein` (Gross-/Kleinschreibung egal,
+   leer = aus). `ROOT_PACKAGE=ture` wuerde sonst dazu fuehren, dass das Repo
+   nichts baut und der Build gruen bleibt - genau der stille Leerlauf, gegen
+   den dieses Change ueberhaupt angetreten ist.
+2. `rootPackage: true` zusammen mit einer anderen `packages`-Liste als `.`.
+   Das Repo ist entweder ein Paket oder eine Menge von Paketordnern; still
+   eines von beiden zu bevorzugen hiesse, die Haelfte der erwarteten Pakete
+   ohne Meldung zu verlieren. `packages = '.'` ist gleichbedeutend und bleibt
+   erlaubt.
+
+Was mit der Erkennung ebenfalls entfaellt: die drei oben genannten
+Fehlerkennungen und die Frage, ob `root_is_package` das Arbeitsverzeichnis
+liest. Was bleibt: `changed-packages.sh` meldet auf stderr, wenn der Schalter
+greift, und der Hinweis "keine Paketordner gefunden" nennt jetzt
+`rootPackage` als moegliche Ursache.

@@ -158,7 +158,13 @@ Map build(Map args) {
             currentBuild.description = 'keine Paketänderungen'
             return versions
         }
-        currentBuild.description = "${pkgs.size()} Paket(e): ${pkgs.join(', ')}"
+        // '.' wie das Stage-Label unten als 'Wurzelpaket' benennen (M-8) -
+        // for-Schleife statt .collect{}, siehe GDK-Iterator-Disziplin (I-3).
+        List labeledPkgs = []
+        for (String pkg : pkgs) {
+            labeledPkgs << (pkg == '.' ? 'Wurzelpaket' : pkg)
+        }
+        currentBuild.description = "${pkgs.size()} Paket(e): ${labeledPkgs.join(', ')}"
 
         parallel pkgs.collectEntries { pkg ->
             [ (pkg): {

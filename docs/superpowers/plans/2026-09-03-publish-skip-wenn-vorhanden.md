@@ -494,3 +494,61 @@ Beim ersten echten Lauf gegen ein Nexus in dieser Reihenfolge pruefen:
    suchen und die tatsaechliche Index-Antwort ansehen.
 3. Ein Paket mit Grossbuchstaben oder Punkt im Namen bauen und pruefen, dass
    die Index-URL den normalisierten Namen nutzt.
+
+---
+
+## Nachtrag 2026-09-03: Ergebnis der Ausfuehrung
+
+Beide Tasks umgesetzt, je Task Review und Fix-Runde; Abschluss-Review ueber den
+gesamten Bereich (0 Critical, 2 Important, 9 Minor, "With fixes"), eine
+Fix-Welle und ein scoped Re-Review, beide sauber. Testtreiber am Ende:
+PASS 280 FAIL 0 SKIP 3 (vorher 237).
+
+Zwei Dinge, die der Plan nicht vorhergesehen hat und die beide in die
+gefaehrliche Richtung zeigten:
+
+* **Falscher Skip durch die Kopplung zweier beratender Pruefungen.** Zeigt
+  `NEXUS_PYPI_HOSTED` auf ein Group-Repo UND ist die Repositories-REST-API
+  nicht erreichbar - jede Situation fuer sich bewusst toleriert -, aggregiert
+  der Simple-Index der Group ihre Member. Ein Treffer aus dem PyPI-Proxy loeste
+  den Skip aus: gruener Build, nichts publiziert. Vorher wurde dieselbe
+  Fehlkonfiguration rot. Behoben, indem die Abkuerzung nur noch genommen wird,
+  wenn `check_repo_type` `hosted pypi` bestaetigt hat; `SKIP_REPO_CHECK=1`
+  zaehlt als "nicht bestaetigt". Das war eine Luecke der Spec, nicht der
+  Umsetzung: zwei unabhaengig als "darf scheitern" entworfene Pruefungen
+  ergaben zusammen ein Gate.
+* **SIGPIPE unter `pipefail`** in der Link-Extraktion: `grep -q` schliesst beim
+  Treffer die Pipe, `sed` stirbt, der Pipeline-Status wird 141 und der Skip
+  verpuffte lautlos. Reproduziert: ab ~36 KB Index. Behoben nach der
+  Hauskonvention aus `sdist-meta.sh` - erst vollstaendig in eine Variable,
+  dann Herestring. Derselbe Fehler war in diesem Projekt schon zweimal
+  behoben worden; der Plan hat ihn trotzdem wieder eingefuehrt.
+
+Ausserdem: `--connect-timeout 10 --max-time 30` an der Index-Abfrage (sie liegt
+auf dem kritischen Pfad jedes `publish()` und darf den Build nicht aufhalten;
+der Upload selbst bleibt ohne Zeitlimit).
+
+### Bewusst zurueckgestellt — nach dem Merge
+
+* Kein Dauertest fuer die Reihenfolge der Stub-URL-Muster; ein Rueckbau faellt
+  der Suite nicht auf.
+* `RC=$?` nach `cfg_credentials | curl` ist unter `pipefail` der Pipeline-Status
+  - vom Abschluss-Review als praktisch unerreichbar nachgewiesen, weil curl die
+  kurze Config immer vollstaendig liest.
+* Der curl-Stub haengt bei einer offenen, nie schliessenden Pipe ohne TTY.
+* `printf '%s\n' "$BODY"` gibt bei leerem Body eine Leerzeile aus.
+* Die README-Aussage zum von Nexus vergebenen Ablagepfad ist unbelegbar.
+
+### Erster echter Lauf gegen ein Nexus — Pruefreihenfolge
+
+1. Dasselbe Paket zweimal bauen. Der zweite Lauf muss `SKIP:` zeigen und
+   **keinen** Upload-Aufruf machen.
+2. Erscheint stattdessen `HINWEIS: Repo-Typ nicht bestaetigt`, liefert die
+   Repositories-REST-API nicht `hosted`/`pypi` fuer euer Repo - dann greift die
+   Abkuerzung nie, und der 400-Pfad uebernimmt.
+3. Erscheint `Vorabpruefung uebersprungen` mit einem HTTP-Status, liefert der
+   Simple-Index nicht das erwartete Format; die tatsaechliche Antwort ansehen.
+4. Ein Paket mit Grossbuchstaben oder Punkt im Namen bauen und pruefen, dass
+   die Index-URL den PEP-503-normalisierten Namen nutzt.
+5. Ein Paket mit vielen Versionen (grosser Index) - der Skip muss auch dort
+   greifen.

@@ -209,12 +209,32 @@ aus, `sdist-meta.sh` liest Name und Version aus der `PKG-INFO`.
 
 ## Doppelte Versionen
 
-Weil die Version aus dem Paket kommt, ist "zweimal dieselbe Version hochladen"
-fast immer ein vergessener Version-Bump. Ein PyPI-hosted-Repo lehnt eine bereits
-vorhandene Version mit HTTP 400 ab; `publish-pypi.sh` wertet den Statuscode
-getrennt vom Antwort-Body aus und bricht dann mit Exit-Code 2 und klarer
-Meldung ab. Andere 400er werden mit Status und Body ausgegeben und enden mit
-Exit-Code 1.
+Wird dieselbe Version erneut gebaut - ein Re-Run, oder ein Monorepo-Build, in
+dem sich nur eines von mehreren Paketen geaendert hat -, laedt
+`publish-pypi.sh` nicht erneut hoch. Vor dem Upload fragt es den Simple-Index
+des Ziel-Repos (`/repository/<repo>/simple/<name>/`, dieselbe API, die auch pip
+liest). Ist der Dateiname dort gelistet, meldet das Skript
+
+    SKIP: mein_paket-1.2.3.tar.gz liegt bereits in pypi-hosted
+
+und endet mit Exit-Code 0. Verglichen wird der exakte Dateiname, nicht als
+Teilzeichenkette - sonst wuerde ein gelistetes `...tar.gz.asc` faelschlich als
+Treffer zaehlen.
+
+Die Pruefung ist eine Abkuerzung, kein Gate. Laesst sich der Index nicht
+abfragen - fehlende Rechte, unerwarteter Status, curl scheitert -, wird nur
+gewarnt und normal hochgeladen. Lehnt Nexus den Upload dann mit HTTP 400 und
+`already exists` bzw. `does not allow updating` ab, gilt dasselbe: Datei liegt
+im Repo, Exit-Code 0, `SKIP`-Meldung. Das deckt auch den Fall ab, dass zwei
+Builds gleichzeitig dieselbe Version hochladen wollen.
+
+**Damit faellt ein vergessener Version-Bump nicht mehr auf.** Der Build wird
+gruen, im Repo bleibt die alte Version liegen. Das ist der Preis dafuer, dass
+ein Re-Run keinen roten Build erzeugt; wer den Bump erzwingen will, prueft die
+Version im Merge-Request statt im Build.
+
+Andere 400er (kein Duplikat) werden mit Status und Body ausgegeben und enden
+mit Exit-Code 1.
 
 `publish-pypi.sh` postet dabei per `curl` gegen
 `{NEXUS_URL}/service/rest/v1/components?repository={NEXUS_PYPI_HOSTED}` - die

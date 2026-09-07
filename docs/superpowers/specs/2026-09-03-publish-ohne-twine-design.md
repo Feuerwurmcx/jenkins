@@ -51,14 +51,15 @@ dem Fliesstext von twine geraten werden.
 |---|---|
 | curl selbst scheitert (rc != 0: Netz, TLS, DNS) | Exit 1 (siehe Nachtrag unten), Inhalt von `$ERR_FILE` nach stderr |
 | 201 oder 204 | `OK: <basename>`, Exit 0 |
-| 400 **und** Body enthaelt `already exists` oder `does not allow updating` (case-insensitive) | Exit 2, "Version liegt bereits im Repo. Version im Paket erhoehen." |
+| 400 **und** Body enthaelt `already exists` oder `does not allow updating` (case-insensitive) | Exit 2, "Version liegt bereits im Repo. Version im Paket erhoehen." (siehe Nachtrag unten: seit der Vorabpruefung Exit 0 mit `SKIP`) |
 | 400 sonst | Exit 1, Status und Body ausgeben |
 | 401 oder 403 | Exit 1, "Zugangsdaten abgelehnt oder keine Deploy-Rechte auf '<repo>'" |
 | 404 | Exit 1, "Repository '<repo>' existiert nicht unter <NEXUS_URL>" |
 | alles andere | Exit 1, Status und Body ausgeben |
 
-Exit-Codes bleiben wie dokumentiert: 2 = Version existiert, 3 = falscher
-Repo-Typ, 1 = sonstiger Fehler.
+Exit-Codes zum Zeitpunkt dieser Spec: 2 = Version existiert, 3 = falscher
+Repo-Typ, 1 = sonstiger Fehler. Exit 2 ist seither entfallen, siehe Nachtrag
+unten.
 
 Nexus antwortet auf einen erfolgreichen Component-Upload mit 204 (kein Body);
 201 wird mit akzeptiert, weil aeltere 3.x-Staende das liefern.
@@ -103,6 +104,7 @@ Neue Faelle:
 
 * 204 -> Exit 0, Ausgabe enthaelt `OK:`
 * 400 mit Body `... already exists ...` -> Exit 2, Meldung nennt den Version-Bump
+  (Stand dieser Spec; seit dem Nachtrag unten ersetzt durch Exit 0 mit `SKIP`)
 * 400 mit anderem Body -> Exit 1, Status und Body erscheinen in der Ausgabe
 * 401 -> Exit 1, Meldung nennt Zugangsdaten/Rechte
 * 404 -> Exit 1, Meldung nennt das Repository
@@ -131,7 +133,9 @@ ehrlich als SKIP auszuweisen.
   `TWINE_USERNAME`/`TWINE_PASSWORD`. Neu: beide curl-Aufrufe lesen die
   Zugangsdaten ueber `--config -` von stdin, inklusive Escaping.
 * `README-ci.md`, Abschnitt zu doppelten Versionen: Exit 2 kommt jetzt aus
-  HTTP 400 plus Body, nicht mehr aus der twine-Ausgabe.
+  HTTP 400 plus Body, nicht mehr aus der twine-Ausgabe. (Stand dieser Spec;
+  seit dem Nachtrag unten beschreibt der Abschnitt die Vorabpruefung mit
+  Exit 0/`SKIP` statt Exit 2.)
 * Kein Zusammenhang mit `vars/pyMonorepo.groovy` — dort aendert sich nichts.
 
 ## Nicht verifizierbar
@@ -185,3 +189,12 @@ curls Exit-Code steht seither nur noch in der Fehlermeldung
 ("`FEHLER: curl scheiterte (curl-Exit <n>)`"), nicht mehr im Exit-Code des
 Skripts. Die Tabelle im Abschnitt "Upload" und Zeile 42 dieser Spec sind
 entsprechend korrigiert.
+
+## Nachtrag 2026-09-03: Duplikate werden uebersprungen, Exit 2 entfaellt
+
+Die Statuszuordnung oben nennt fuer HTTP 400 mit `already exists` bzw.
+`does not allow updating` den Exit-Code 2. Das ist ersetzt: seit der
+Vorabpruefung ueber den Simple-Index gilt ein Duplikat als "nichts zu tun" und
+endet mit Exit 0 und einer `SKIP`-Meldung - sowohl wenn die Vorabpruefung es
+findet als auch wenn erst Nexus mit 400 antwortet. Exit-Code 2 kommt im Skript
+nicht mehr vor. Details: `2026-09-03-publish-skip-wenn-vorhanden-design.md`.

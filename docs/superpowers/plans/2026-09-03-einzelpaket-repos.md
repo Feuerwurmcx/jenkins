@@ -530,3 +530,69 @@ EOF
 1. Einen Build von `dpl-components` oder `dpl-core` mit `SKIP_UPLOAD` laufen lassen. Erwartet: eine Stage `Wurzelpaket`, im Log `Repo-Wurzel -> dpl-components 0.2.12`.
 2. Kommt stattdessen `HINWEIS: keine Paketordner ...`, greift die Erkennung nicht — dann die Wurzel-`pyproject.toml` des Repos auf einen verankerten `[project]`-Abschnitt pruefen.
 3. Pruefen, ob weitere Bitbucket-Repos dieser Bauart sind. `dpl-skill` hat gar keine `pyproject.toml` und bleibt auch danach kein Paket.
+
+---
+
+## Nachtrag 2026-09-07: Ergebnis der Ausfuehrung
+
+Beide Tasks umgesetzt, je ein Review und eine Fixrunde, danach ein
+Abschluss-Review ueber den gesamten Bereich `c3d9088..46b38e1` mit einer
+Fix-Welle. Commits: `dfb654c`, `716ac65` (Task 1), `545aace`, `46b38e1`
+(Task 2), `f4cc8af`..`91c7b68` (Fix-Welle). Suite: PASS 318 FAIL 0 SKIP 3.
+Beide echten Repos melden `.`.
+
+### Ueber den Plan hinaus entschieden
+
+1. **`setup.cfg` zaehlt nur mit `[metadata]`- oder `[options]`-Abschnitt.**
+   Die Spec sagte woertlich nur "setup.cfg existiert". Ohne die
+   Inhaltspruefung macht eine `setup.cfg`, die nur `[flake8]` enthaelt, aus
+   einem Monorepo ein Einzelpaket — alle seine Pakete verschwinden lautlos.
+2. **Beide Abschnittsmuster tolerieren inneren Leerraum und einen
+   nachgestellten Kommentar** (`[ project ]`, `[metadata]  # x`). Gueltige
+   Syntax fiel sonst durch, und zwar in dieselbe stille Richtung.
+3. **`packages = '.'` funktioniert jetzt.** Der Schnittmengen-Zweig hat `.`
+   gegen die Liste beruehrter Ordner geprueft, wo es nie auftauchen kann:
+   bei echter Basis war die Ausgabe leer, rc 0, ohne Hinweis — dieselbe
+   Fehlerklasse, gegen die dieser Plan angetreten ist, nur mit anderem
+   Ausloeser. Gefunden vom Abschluss-Review, nicht vom Plan.
+4. **Die Wurzelerkennung nennt ihren Ausloeser auf stderr.** Das macht die
+   drei bekannten Fehlerkennungen (Wurzel-`setup.py` als Dev-Shim, `[project]`
+   in einem mehrzeiligen TOML-String, `[metadata]` in einer
+   configparser-Fortsetzungszeile) im Log sofort sichtbar statt nach Stunden.
+
+Beide Aenderungen an der Erkennungsregel stehen als Nachtrag auch in der
+Spec, weil sie das Abnahmedokument ist.
+
+### Bewusst offen gelassen
+
+- **`[project]` in einem mehrzeiligen TOML-String** ergibt faelschlich ein
+  Einzelpaket; ebenso `[metadata]` in einer configparser-Fortsetzungszeile.
+  Sauber nur mit einem echten TOML-Parser loesbar, im Kopfkommentar des
+  Skripts als Grenze festgehalten, durch den stderr-Hinweis diagnostizierbar.
+- **Wurzel-`setup.py` wird nicht auf Inhalt geprueft.** Ein Dev-Shim in der
+  Wurzel eines Monorepos laesst es zu einem Paket kollabieren. Die Regel zu
+  aendern waere eine Spec-Aenderung und braucht eine Entscheidung; der
+  stderr-Hinweis macht den Fall bis dahin sichtbar.
+- **`root_is_package` liest das Arbeitsverzeichnis.** Aus einem Unterordner
+  heraus meldet ein Monorepo `.`. Der einzige produktive Aufrufer ist
+  `pyMonorepo.changedPackages()`, der immer in der Workspace-Wurzel laeuft;
+  die Eigenschaft ist ausserdem geerbt (`for d in */` war schon immer
+  CWD-relativ).
+
+### Reihenfolge fuer den ersten echten Lauf
+
+1. `dpl-components` oder `dpl-core` mit `SKIP_UPLOAD` bauen. Das ist der
+   einzige Schritt, der lokal nie pruefbar war: `python3 -m build --sdist`
+   gegen die Repo-Wurzel gibt es hier nicht. **Vor jedem Upload ohne
+   `SKIP_UPLOAD` muss dieser Lauf stattgefunden haben.**
+2. Im Log pruefen: Stage `Wurzelpaket`, `Repo-Wurzel -> dpl-components 0.2.12`,
+   und die Hinweiszeile mit dem Ausloeser `pyproject.toml`.
+3. Kommt stattdessen `HINWEIS: keine Paketordner ...`, greift die Erkennung
+   nicht — die Wurzel-`pyproject.toml` auf einen verankerten
+   `[project]`-Abschnitt pruefen.
+4. **Inhalt der sdist pruefen.** Neu bei `PKG='.'`: `dist/` und `.ci-lib/`
+   liegen erstmals *im* Quellbaum. Mit setuptools und
+   `packages.find where = ["src"]` — so bauen beide Repos — landet nichts
+   davon im Artefakt. Bei hatchling/flit/pdm waere das anders.
+5. Pruefen, ob weitere Bitbucket-Repos dieser Bauart sind. `dpl-skill` hat
+   gar keine `pyproject.toml` und bleibt auch danach kein Paket.

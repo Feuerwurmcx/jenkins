@@ -1598,6 +1598,31 @@ name = m')"
 assert_eq "Wurzel-setup.cfg mit [metadata] -> ." "." \
   "$(cd "$RCFGMETA" && $CP '' 2>/dev/null)"
 
+# Dieselbe Toleranz wie bei pyproject.toml: configparser erlaubt Leerraum um
+# den Abschnittsnamen und einen Kommentar dahinter, eine strengere Pruefung
+# wuerde ein echtes Einzelpaket lautlos auf "kein Paket" fallen lassen.
+RCFGSPACED="$(make_root_setupcfg_repo cfgspaced '[ metadata ]
+name = s')"
+assert_eq "Wurzel-setup.cfg mit [ metadata ] -> ." "." \
+  "$(cd "$RCFGSPACED" && $CP '' 2>/dev/null)"
+
+RCFGCOMMENT="$(make_root_setupcfg_repo cfgcomment '[metadata]  # Kommentar
+name = c')"
+assert_eq "Wurzel-setup.cfg mit [metadata]  # Kommentar -> ." "." \
+  "$(cd "$RCFGCOMMENT" && $CP '' 2>/dev/null)"
+
+# [options.extras_require] und [metadata.foo] zaehlen weiterhin NICHT: dort
+# folgt auf den Abschnittsnamen kein "]", sondern ein ".".
+RCFGEXTRAS="$(make_root_setupcfg_repo cfgextras '[options.extras_require]
+dev = pytest')"
+assert_eq "nur [options.extras_require] -> weiter Monorepo" "alpha" \
+  "$(cd "$RCFGEXTRAS" && $CP '' 2>/dev/null)"
+
+RCFGMETAFOO="$(make_root_setupcfg_repo cfgmetafoo '[metadata.foo]
+bar = baz')"
+assert_eq "nur [metadata.foo] -> weiter Monorepo" "alpha" \
+  "$(cd "$RCFGMETAFOO" && $CP '' 2>/dev/null)"
+
 RPOETRY="$(make_root_repo poetry '[tool.poetry]
 name = "p"
 version = "1.0"')"

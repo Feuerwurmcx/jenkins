@@ -46,14 +46,23 @@ BASE="${1:-}"
 # Wurzel-setup.cfg mit nur Linter-Konfiguration ([flake8], [mypy], ...) ist in
 # Python-Monorepos verbreitet und darf ein Monorepo nicht faelschlich zum
 # Einzelpaket machen. Erst ein [metadata]- oder [options]-Abschnitt macht
-# daraus Paket-Metadaten, das Muster ist verankert wie bei pyproject.toml.
+# daraus Paket-Metadaten. Das Muster ist verankert (^...$) und toleriert
+# denselben Leerraum und Kommentar wie bei pyproject.toml: configparser (der
+# setup.cfg parst) erlaubt wie TOML Leerraum um den Abschnittsnamen und einen
+# Kommentar dahinter, "[ metadata ]" und "[metadata]  # Kommentar" sind darin
+# ebenso gueltig wie "[metadata]". Eine strengere Pruefung wuerde ein echtes
+# Einzelpaket mit so formatierter setup.cfg lautlos auf "kein Paket" fallen
+# lassen - dieselbe gefaehrliche Richtung, gegen die auch die
+# pyproject-Toleranz eingefuehrt wurde. "[options.extras_require]" und
+# "[metadata.foo]" zaehlen weiterhin NICHT: dort folgt auf den Abschnittsnamen
+# kein "]", sondern ein ".".
 # setup.py bleibt dagegen bewusst OHNE Inhaltspruefung: anders als setup.cfg
 # oder pyproject.toml hat eine setup.py in der Wurzel praktisch keinen
 # verbreiteten Nur-Werkzeugkonfiguration-Zweck - sie existiert so gut wie
 # immer, um ein Paket zu bauen.
 root_is_package() {
   [[ -f setup.py ]] && return 0
-  if [[ -f setup.cfg ]] && grep -qE '^[[:space:]]*\[(metadata|options)\][[:space:]]*$' setup.cfg; then
+  if [[ -f setup.cfg ]] && grep -qE '^[[:space:]]*\[[[:space:]]*(metadata|options)[[:space:]]*\][[:space:]]*(#.*)?$' setup.cfg; then
     return 0
   fi
   [[ -f pyproject.toml ]] || return 1

@@ -305,10 +305,13 @@ mit einem `[project]`- bzw. `[tool.poetry]`-Abschnitt. Bei `setup.cfg` und
 Linter-Konfiguration enthaelt (`[flake8]`, `[mypy]`), oder eine
 `pyproject.toml`, die nur Werkzeugkonfiguration enthaelt (`[tool.black]`,
 `[tool.ruff]`), steht auch in einem echten Monorepo in der Wurzel und darf es
-nicht in ein Einzelpaket verwandeln. `[project.optional-dependencies]` allein
-zaehlt ebenfalls nicht - danach kommt kein `]`, sondern ein `.`. Das Muster ist
-verankert, toleriert aber Leerraum um den Abschnittsnamen und einen Kommentar
-dahinter: `[ project ]` und `[project]  # Kommentar` zaehlen beide.
+nicht in ein Einzelpaket verwandeln. `[project.optional-dependencies]` bzw.
+`[options.extras_require]` und `[metadata.foo]` zaehlen ebenfalls nicht -
+danach kommt kein `]`, sondern ein `.`. Fuer beide Dateiformate gilt dieselbe
+Regel: der Abschnittskopf muss verankert stehen (`^...$`), toleriert wird aber
+Leerraum um den Abschnittsnamen und ein Kommentar dahinter - `[ project ]`,
+`[project]  # Kommentar`, `[ metadata ]` und `[metadata]  # Kommentar` zaehlen
+alle.
 
 Hat ein Repo **beides** - Metadaten in der Wurzel und Paketordner darunter -,
 gewinnt die Wurzel: es gilt als ein Paket. Wer das nicht will, setzt

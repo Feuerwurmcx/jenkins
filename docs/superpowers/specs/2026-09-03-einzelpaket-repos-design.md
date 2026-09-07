@@ -154,3 +154,31 @@ heutige Zustand. Jeder Einzelpaket-Fall muss auf die exakte Ausgabe `.` pruefen.
   `build`; der `setup.py`-Fallback kann bei einem reinen pyproject-Projekt
   nicht greifen. Auf einem Agent mit `build` sollte es funktionieren, der erste
   echte Lauf muss es bestaetigen.
+
+## Nachtrag 2026-09-07: zwei Entscheidungen aus der Umsetzung
+
+Beim Abschluss-Review (I-2) fiel auf, dass die Erkennungsregel oben (Zeile 36,
+54, 57-58) an genau der Stelle vom Code abweicht, die dieses Change bewusst
+geaendert hat - beides inhaltlich richtig, aber nirgends festgehalten.
+Nachgetragen:
+
+**(a) `setup.cfg` allein genuegt nicht - erst ein `[metadata]`- oder
+`[options]`-Abschnitt macht daraus Paket-Metadaten.** Eine Wurzel-`setup.cfg`
+mit nur Linter-Konfiguration (`[flake8]`, `[mypy]`, ...) ist in
+Python-Monorepos verbreitet und darf ein echtes Monorepo nicht faelschlich in
+ein Einzelpaket verwandeln - dieselbe Ueberlegung, die die
+`pyproject.toml`-Pruefung schon immer hatte. Ohne Inhaltspruefung waere ein
+Monorepo mit so einer `setup.cfg` in der Wurzel lautlos auf ein Einzelpaket
+kollabiert.
+
+**(b) Beide Muster tolerieren inneren Leerraum und einen nachgestellten
+Kommentar.** Tatsaechlich implementiert (statt der veralteten Muster in Zeile
+57-58):
+
+* `pyproject.toml`: `^[[:space:]]*\[[[:space:]]*(project|tool\.poetry)[[:space:]]*\][[:space:]]*(#.*)?$`
+* `setup.cfg`: `^[[:space:]]*\[[[:space:]]*(metadata|options)[[:space:]]*\][[:space:]]*(#.*)?$`
+
+Gueltige Syntax wie `[ project ]` oder `[metadata]  # Kommentar` - TOML und
+configparser erlauben beides - fiel sonst lautlos durch, mit derselben
+gefaehrlichen Richtung wie der stille Leerlauf: ein echtes Einzelpaket haette
+niemand gebaut.

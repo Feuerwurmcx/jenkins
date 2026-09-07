@@ -596,3 +596,24 @@ Spec, weil sie das Abnahmedokument ist.
    davon im Artefakt. Bei hatchling/flit/pdm waere das anders.
 5. Pruefen, ob weitere Bitbucket-Repos dieser Bauart sind. `dpl-skill` hat
    gar keine `pyproject.toml` und bleibt auch danach kein Paket.
+
+---
+
+## Nachtrag 2026-09-07: Automatik zurueckgenommen
+
+Auf Wunsch des Nutzers entscheidet nicht mehr das Skript, ob ein Repo selbst
+ein Paket ist, sondern ein Schalter: `rootPackage` bzw. `ROOT_PACKAGE`.
+Begruendung und genaue Regeln stehen im Nachtrag der Spec; `README-ci.md`
+beschreibt die Anwendung.
+
+Damit sind die oben unter "Bewusst offen gelassen" genannten Punkte
+gegenstandslos: die beiden Textmuster-Grenzen (mehrzeiliger TOML-String,
+configparser-Fortsetzungszeile), die fehlende Inhaltspruefung von
+Wurzel-`setup.py` und die CWD-Abhaengigkeit von `root_is_package` betrafen
+alle die Erkennung, die es nicht mehr gibt.
+
+Die Reihenfolge fuer den ersten echten Lauf gilt unveraendert, mit einer
+Ergaenzung an Schritt 2: im Log muss `HINWEIS: ROOT_PACKAGE gesetzt - das Repo
+gilt als EIN Paket '.'` stehen. Fehlt die Zeile, ist der Schalter im
+Jenkinsfile nicht angekommen - dann meldet das Skript stattdessen `HINWEIS:
+keine Paketordner gefunden`.

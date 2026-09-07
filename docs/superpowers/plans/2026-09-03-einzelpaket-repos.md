@@ -528,8 +528,8 @@ EOF
 ## Nach dem Plan
 
 1. Einen Build von `dpl-components` oder `dpl-core` mit `SKIP_UPLOAD` laufen lassen. Erwartet: eine Stage `Wurzelpaket`, im Log `Repo-Wurzel -> dpl-components 0.2.12`.
-2. Kommt stattdessen `HINWEIS: keine Paketordner ...`, greift die Erkennung nicht — dann die Wurzel-`pyproject.toml` des Repos auf einen verankerten `[project]`-Abschnitt pruefen.
-3. Pruefen, ob weitere Bitbucket-Repos dieser Bauart sind. `dpl-skill` hat gar keine `pyproject.toml` und bleibt auch danach kein Paket.
+2. Kommt stattdessen `HINWEIS: keine Paketordner ...`, ist `rootPackage` nicht angekommen — im Jenkinsfile pruefen (siehe Nachtrag vom 2026-09-07: seither entscheidet ein Schalter, keine Erkennung).
+3. Pruefen, ob weitere Bitbucket-Repos dieser Bauart sind und dort ebenfalls `rootPackage = true` setzen. `dpl-skill` hat gar keine `pyproject.toml` und ist kein Paket.
 
 ---
 
@@ -586,10 +586,9 @@ Spec, weil sie das Abnahmedokument ist.
    gegen die Repo-Wurzel gibt es hier nicht. **Vor jedem Upload ohne
    `SKIP_UPLOAD` muss dieser Lauf stattgefunden haben.**
 2. Im Log pruefen: Stage `Wurzelpaket`, `Repo-Wurzel -> dpl-components 0.2.12`,
-   und die Hinweiszeile mit dem Ausloeser `pyproject.toml`.
-3. Kommt stattdessen `HINWEIS: keine Paketordner ...`, greift die Erkennung
-   nicht — die Wurzel-`pyproject.toml` auf einen verankerten
-   `[project]`-Abschnitt pruefen.
+   und `HINWEIS: ROOT_PACKAGE gesetzt - das Repo gilt als EIN Paket '.'`.
+3. Kommt stattdessen `HINWEIS: keine Paketordner ...`, ist `rootPackage` nicht
+   bis ins Skript gekommen — im Jenkinsfile pruefen.
 4. **Inhalt der sdist pruefen.** Neu bei `PKG='.'`: `dist/` und `.ci-lib/`
    liegen erstmals *im* Quellbaum. Mit setuptools und
    `packages.find where = ["src"]` — so bauen beide Repos — landet nichts

@@ -65,7 +65,9 @@ esac
 # ist deshalb vertraeglich.
 if [[ $ROOT_PACKAGE_ON -eq 1 && -n "${PACKAGES:-}" ]]; then
   # read -ra: Wortaufteilung ohne Pfadnamen-Expansion, siehe all_packages().
-  read -ra _rp_pkgs <<<"${PACKAGES}"
+  # -d '': ohne das liest read nur bis zum ersten Zeilenumbruch - eine
+  # mehrzeilige Liste haette hier still nur ihre erste Zeile geprueft.
+  read -ra _rp_pkgs -d '' <<<"${PACKAGES}" || true
   # Laenge 0 (PACKAGES bestand nur aus Leerraum) ist kein Widerspruch: eine
   # leere Liste bedeutet ohnehin "keine feste Liste", siehe all_packages().
   if [[ ${#_rp_pkgs[@]} -gt 0 ]] && { [[ ${#_rp_pkgs[@]} -ne 1 ]] || [[ "${_rp_pkgs[0]}" != "." ]]; }; then
@@ -98,7 +100,11 @@ all_packages() {
     # 'alpha' expandiert. read -ra fuehrt nur Wortaufteilung durch, keine
     # Pfadnamen-Expansion.
     local -a pkgs
-    read -ra pkgs <<<"${PACKAGES}"
+    # -d '': ohne das endet read am ersten Zeilenumbruch, und alles ab der
+    # zweiten Zeile verschwindet spurlos - bei einer Paketliste heisst das:
+    # Pakete werden nicht gebaut, ohne jede Meldung. read gibt am Dateiende
+    # ohne Trenner nichtnull zurueck, deshalb '|| true' unter 'set -e'.
+    read -ra pkgs -d '' <<<"${PACKAGES}" || true
     # Bash 3.2: "${pkgs[@]}" bricht unter 'set -u' mit "unbound variable" ab,
     # wenn das Array leer ist (z. B. PACKAGES bestand nur aus Leerzeichen).
     # Deshalb erst die Laenge pruefen, bevor das Array expandiert wird.

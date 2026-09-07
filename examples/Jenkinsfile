@@ -12,11 +12,15 @@ pyMonorepo {
     // HOSTED-Repo, nie die Group: Group-Repos nehmen keine Uploads an.
     hostedRepo = 'pypi-hosted'
 
+    // Ist das Repo SELBST ein Paket - Metadaten in der Wurzel, Quellcode
+    // unter src/, keine Paketordner -, dann diese Zeile einkommentieren.
+    // Sie ist die einzige Angabe, die das Skript nicht erraten kann; ohne
+    // sie findet es keine Pakete und baut nichts (Hinweis dazu im Log).
+    // Der Default ist false, also "Monorepo mit Paketordnern".
+    // rootPackage = true
+
     // Optional, hier mit ihren Defaults:
     // credentialsId = 'nexus-pypi-deploy'  // Username/Password-Credential in Jenkins
     // packages      = ''                   // leer = Auto-Erkennung der Paketordner
-    // rootPackage   = true                 // wenn das Repo SELBST ein Paket ist:
-    //                                      // Metadaten in der Wurzel, Quellcode
-    //                                      // unter src/, keine Paketordner
     // keepBuilds    = 30
 }

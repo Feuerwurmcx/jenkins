@@ -779,7 +779,11 @@ $BAD_BARE"; fi
   assert_contains "build() kennt die erlaubten Schluessel" "$BUILD_MAP_BODY" \
     "['nexusUrl', 'hostedRepo', 'credentialsId', 'packages', 'rootPackage', 'buildAll', 'skipUpload', 'base', 'archive', 'cleanup']"
   assert_contains "build() lehnt unbekannte Schluessel ab" "$BUILD_MAP_BODY" 'unbekannte Argumente'
-  assert_contains "build(): Stage-Label fuer das Wurzelpaket" "$BUILD_MAP_BODY" "Wurzelpaket"
+  # M-5: "Wurzelpaket" allein findet seinen Treffer schon in der stage()-Zeile
+  # unten und kann deshalb nie rot werden. Gepinnt wird die Build-Beschreibung,
+  # die das Label eigenstaendig noch einmal setzt.
+  assert_contains "build(): Wurzelpaket-Label in der Build-Beschreibung" "$BUILD_MAP_BODY" \
+    "labeledPkgs << (pkg == '.' ? 'Wurzelpaket' : pkg)"
   for NEEDLE in "stage(pkg == '.' ? 'Wurzelpaket' : pkg)" \
                 "if (skipUpload) {" \
                 'echo "Basis   :' \
@@ -873,7 +877,7 @@ $BAD_BARE"; fi
   #     nicht unbemerkt aus einem Step verschwinden koennen.
   CP1_BODY="$(step_body 'List changedPackages(String base)')"
   CP2_BODY="$(step_body 'List changedPackages(String base, String packages)')"
-  CP3_BODY="$(step_body 'List changedPackages(String base, String packages, boolean rootPackage)')"
+  CP3_BODY="$(step_body 'List changedPackages(String base, String packages, Object rootPackage)')"
   BUILD_BODY="$(step_body 'String buildSdist(String pkg)')"
   PUBLISH_BODY="$(step_body 'void publish(Map args)')"
   INSTALL_BODY="$(step_body 'String install()')"
@@ -888,9 +892,22 @@ $BAD_BARE"; fi
   # des Skripts durchkommen. Bricht die Kette an einer Stelle, faellt das
   # Repo still auf "kein Wurzelpaket" zurueck und baut nichts.
   assert_contains "changedPackages() reicht ROOT_PACKAGE per withEnv weiter" "$CP3_BODY" \
-    "ROOT_PACKAGE=\${rootPackage ? 'true' : 'false'}"
-  assert_contains "build() wertet rootPackage aus (Argument vor params)" "$BUILD_MAP_BODY" \
-    "args.containsKey('rootPackage') ? toBool(args.rootPackage, false) : paramOr('ROOT_PACKAGE', false)"
+    'ROOT_PACKAGE=${asRaw(rootPackage)}'
+  # Object, nicht boolean: eine Groovy-seitige Typumwandlung waere schon die
+  # Umdeutung, die hier nicht stattfinden soll.
+  assert_contains "changedPackages() nimmt rootPackage als Object" "$CODE" \
+    'List changedPackages(String base, String packages, Object rootPackage)'
+  # I-1: rootPackage darf NICHT durch toBool() laufen - das machte aus jedem
+  # Nicht-'true'-Wert still false (auch aus 'ja', 1 und aus Tippfehlern), und
+  # das Einzelpaket-Repo baute nichts bei gruenem Build. Der Waechter steht im
+  # Skript; Groovy reicht den Rohwert durch.
+  assert_contains "build() reicht rootPackage ROH weiter (nicht ueber toBool)" "$BUILD_MAP_BODY" \
+    "args.containsKey('rootPackage') ? asRaw(args.rootPackage) : paramRaw('ROOT_PACKAGE')"
+  if grep -qE "toBool\([^)]*rootPackage" <<<"$BUILD_MAP_BODY"; then
+    nok "build(): rootPackage laeuft nicht durch toBool()" "$(grep -nE 'toBool\([^)]*rootPackage' <<<"$BUILD_MAP_BODY")"
+  else ok "build(): rootPackage laeuft nicht durch toBool()"; fi
+  PARAMRAW_BODY="$(step_body 'private String paramRaw(String name)')"
+  assert_contains "paramRaw() deutet den Wert nicht um" "$PARAMRAW_BODY" 'return asRaw(p[name])'
   assert_contains "build() reicht rootPackage an changedPackages() weiter" "$BUILD_MAP_BODY" \
     "changedPackages(base, args.packages ?: '', rootPackage)"
   assert_contains "Vollpipeline kennt die Konfiguration rootPackage" "$CODE" 'rootPackage  : false,'
@@ -1664,6 +1681,29 @@ assert_eq "ohne ROOT_PACKAGE, echte Basis, alpha/ geaendert -> alpha" "alpha" \
 # '.' zaehlt jede geaenderte Datei, auch wenn nur alpha/ geaendert wurde.
 assert_eq "PACKAGES='. alpha' -> . und alpha" "$(printf '.\nalpha')" \
   "$(cd "$RMIX" && PACKAGES='. alpha' $CP HEAD~1 2>/dev/null)"
+
+# I-2: eine mehrzeilige PACKAGES-Liste. 'read -ra' ohne -d '' endet am ersten
+# Zeilenumbruch: alles ab der zweiten Zeile verschwand spurlos - Pakete wurden
+# nicht gebaut, ohne jede Meldung. Ein Jenkinsfile kann die Liste durchaus
+# ueber mehrere Zeilen aufbauen.
+RMULTI="${TMP}/rootrepo-multi"; rm -rf "$RMULTI"; mkdir -p "$RMULTI/alpha" "$RMULTI/beta"
+echo "from setuptools import setup" > "$RMULTI/alpha/setup.py"
+echo "from setuptools import setup" > "$RMULTI/beta/setup.py"
+( cd "$RMULTI" && git init -q -b main && git config user.email t@e.x && git config user.name T \
+  && git add -A && git commit -q -m init ) >/dev/null
+assert_eq "I-2: mehrzeiliges PACKAGES verliert nichts" "$(printf 'alpha\nbeta')" \
+  "$(cd "$RMULTI" && PACKAGES="$(printf 'alpha\nbeta')" $CP '' 2>/dev/null)"
+
+# I-2: derselbe Fehler in der Widerspruchspruefung - sie sah nur die erste
+# Zeile und liess '.' plus alpha als vertraeglich durchgehen.
+OUT_MULTI="$(cd "$RMULTI" && ROOT_PACKAGE=true PACKAGES="$(printf '.\nalpha')" $CP '' 2>/dev/null)"; RC_MULTI=$?
+assert_rc "I-2: mehrzeiliger Widerspruch -> rc 2" 2 "$RC_MULTI"
+assert_eq "I-2: mehrzeiliger Widerspruch -> keine Ausgabe" "" "$OUT_MULTI"
+
+# M-4: der Hinweis bei "kein Paket gefunden" muss auf rootPackage zeigen -
+# das ist der Ort, an dem ein vergessener Schalter auffaellt.
+assert_contains "Hinweis nennt rootPackage als Ursache" \
+  "$(cd "$RMULTI/alpha" && $CP '' 2>&1 >/dev/null)" "rootPackage"
 
 # CI-Aenderung baut alles - beim Einzelpaket ist "alles" genau '.'.
 ( cd "$SREPO" && mkdir -p ci && echo "x" > ci/irgendwas.sh && git add -A && git commit -q -m ci )

@@ -147,7 +147,13 @@ Map build(Map args) {
     boolean doCleanup  = args.containsKey('cleanup')    ? toBool(args.cleanup, true)     : true
     boolean buildAll   = args.containsKey('buildAll')   ? toBool(args.buildAll, false)   : paramOr('BUILD_ALL', false)
     boolean skipUpload = args.containsKey('skipUpload') ? toBool(args.skipUpload, false) : paramOr('SKIP_UPLOAD', false)
-    boolean rootPackage = args.containsKey('rootPackage') ? toBool(args.rootPackage, false) : paramOr('ROOT_PACKAGE', false)
+    // NICHT ueber toBool(): das macht aus jedem Nicht-'true'-Wert still
+    // false - auch aus einem Tippfehler und aus 'ja'/'yes'/1. Ein
+    // Einzelpaket-Repo baute dann nichts und der Build bliebe gruen, genau
+    // der stille Leerlauf, gegen den der Waechter in changed-packages.sh
+    // steht. Der Wert geht deshalb ROH weiter; das Skript entscheidet und
+    // bricht bei Unverstandenem laut ab.
+    String rootPackage = args.containsKey('rootPackage') ? asRaw(args.rootPackage) : paramRaw('ROOT_PACKAGE')
     String hostedRepo    = args.hostedRepo    ?: 'pypi-hosted'
     String credentialsId = args.credentialsId ?: 'nexus-pypi-deploy'
     Map versions = [:]   // CPS-Branches laufen kooperativ, kein Sync noetig
@@ -253,17 +259,23 @@ List changedPackages(String base, String packages) {
     return changedPackages(base, packages, false)
 }
 
-// Wie oben, aber rootPackage=true erklaert das Repo SELBST zum Paket: die
+// Wie oben, aber rootPackage erklaert das Repo SELBST zum Paket: die
 // Paketliste ist dann genau '.', und jede geaenderte Datei zaehlt dafuer.
 // Fuer Repos mit Metadaten in der Wurzel und Quellcode unter src/, die keine
 // Paketordner haben. Das Skript ERKENNT das nicht von selbst - siehe die
-// Begruendung im Kopf von changed-packages.sh. Ein rootPackage=true zusammen
-// mit einer anderen packages-Liste als '.' bricht dort mit Exit 2 ab.
-List changedPackages(String base, String packages, boolean rootPackage) {
+// Begruendung im Kopf von changed-packages.sh.
+//
+// rootPackage ist bewusst Object und wird ROH weitergereicht: true, 'true',
+// 'ja', 1 - was davon gilt, entscheidet changed-packages.sh an EINER Stelle,
+// und was es nicht versteht, bricht dort mit Exit 2 ab. Eine Umdeutung hier
+// (etwa per toBool()) wuerde einen Tippfehler still zu 'false' machen: das
+// Repo baute nichts, der Build bliebe gruen. Ein rootPackage zusammen mit
+// einer anderen packages-Liste als '.' bricht ebenfalls mit Exit 2 ab.
+List changedPackages(String base, String packages, Object rootPackage) {
     requireInstalled()
     String out
     withEnv(["BASE=${base ?: ''}", "PACKAGES=${packages ?: ''}",
-             "ROOT_PACKAGE=${rootPackage ? 'true' : 'false'}"]) {
+             "ROOT_PACKAGE=${asRaw(rootPackage)}"]) {
         out = sh(returnStdout: true,
                  script: 'bash "$CI_LIB_DIR/changed-packages.sh" "$BASE"').trim()
     }
@@ -388,6 +400,21 @@ private boolean paramOr(String name, boolean dflt) {
 // GStrings, ...) laeuft ueber toString().trim().equalsIgnoreCase('true') -
 // und ist damit fast immer false, sofern es nicht literal 'true' ergibt
 // (I-1/I-2).
+// Rohwert als String, ohne jede Umdeutung - null und fehlend werden zu ''
+// (= aus). Gegenstueck zu toBool() fuer Werte, die woanders geprueft werden.
+private String asRaw(Object v) {
+    return v == null ? '' : v.toString()
+}
+
+// Wie paramOr(), aber ohne Umdeutung. Siehe die Begruendung bei rootPackage
+// in build().
+private String paramRaw(String name) {
+    def p = null
+    try { p = params } catch (Exception ignored) { return '' }
+    if (!(p instanceof Map) || !p.containsKey(name)) { return '' }
+    return asRaw(p[name])
+}
+
 private boolean toBool(Object v, boolean dflt) {
     if (v == null) { return dflt }
     if (v instanceof Boolean) { return (Boolean) v }

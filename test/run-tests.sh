@@ -259,6 +259,46 @@ fixture_repo() {  # -> Pfad auf stdout
   printf '%s\n' "$d"
 }
 
+# Wie fixture_repo, aber fuer ein Repo, das SELBST ein Paket ist:
+# pyproject.toml in der Wurzel, Quellcode unter src/. Bewusst ein eigenes
+# Fixture - ein Monorepo-Fixture und ein Einzelpaket-Fixture schliessen
+# einander aus.
+fixture_single_repo() {  # -> Pfad auf stdout
+  local d="${TMP}/repo-single"
+  rm -rf "$d"; mkdir -p "$d"
+  cp -R "${ROOT}/test/fixture-single/." "$d/"
+  (
+    cd "$d"
+    git init -q -b main
+    git config user.email test@example.com
+    git config user.name Test
+    git add -A
+    git commit -q -m "fixture-single"
+  ) >/dev/null
+  printf '%s\n' "$d"
+}
+
+# Baut ein Wegwerf-Repo mit frei waehlbarem Wurzelinhalt, um die Abgrenzung
+# zwischen echtem Paket und reiner Werkzeugkonfiguration zu pruefen.
+#   make_root_repo <unterordner> <inhalt der pyproject.toml oder "">
+# Legt zusaetzlich immer einen Ordner alpha/ MIT setup.py an, damit sichtbar
+# wird, ob die Wurzelerkennung die Unterordner-Suche verdraengt oder nicht.
+make_root_repo() {  # -> Pfad auf stdout
+  local d="${TMP}/rootrepo-$1"; shift
+  rm -rf "$d"; mkdir -p "$d/alpha"
+  echo "from setuptools import setup" > "$d/alpha/setup.py"
+  if [[ -n "${1:-}" ]]; then printf '%s\n' "$1" > "$d/pyproject.toml"; fi
+  (
+    cd "$d"
+    git init -q -b main
+    git config user.email test@example.com
+    git config user.name Test
+    git add -A
+    git commit -q -m init
+  ) >/dev/null
+  printf '%s\n' "$d"
+}
+
 echo "=== Syntax ==="
 for f in "$SCRIPTS"/*.sh "${ROOT}/test/run-tests.sh"; do
   if bash -n "$f" 2>/dev/null; then ok "bash -n $(basename "$f")"
@@ -1484,6 +1524,77 @@ assert_contains "400 trotz Vorabpruefung -> Herkunft ist der 400-Pfad" \
   "$PUB_OUT" "(Nexus meldete HTTP 400)"
 
 skip "publish-pypi.sh echter Netzwerk-Upload" "braucht ein erreichbares Nexus - bewusst nicht getestet"
+
+echo
+echo "=== changed-packages.sh: Einzelpaket-Repos ==="
+CP="bash $SCRIPTS/changed-packages.sh"
+
+# Achtung: eine LEERE Ausgabe ist der heutige Zustand und beweist nichts.
+# Jeder Einzelpaket-Fall prueft deshalb auf die exakte Ausgabe '.'.
+SREPO="$(fixture_single_repo)"
+assert_eq "Wurzel mit [project] -> ." "." \
+  "$(cd "$SREPO" && $CP '' 2>/dev/null)"
+
+# Eine Aenderung irgendwo im Repo zaehlt fuer das eine Paket - die Zuordnung
+# ueber die erste Pfadkomponente gibt es hier nicht.
+( cd "$SREPO" && echo "x" >> src/einzelpaket/__init__.py && git add -A && git commit -q -m aenderung )
+assert_eq "Einzelpaket, Datei unter src/ geaendert -> ." "." \
+  "$(cd "$SREPO" && $CP HEAD~1 2>/dev/null)"
+
+( cd "$SREPO" && git commit -q --allow-empty -m leer )
+assert_eq "Einzelpaket, nichts geaendert -> leer" "" \
+  "$(cd "$SREPO" && $CP HEAD~1 2>/dev/null)"
+
+# setup.py in der Wurzel genuegt, ohne pyproject.toml.
+RSETUP="$(make_root_repo setuppy "")"
+( cd "$RSETUP" && echo "from setuptools import setup" > setup.py && git add -A && git commit -q -m setup )
+assert_eq "Wurzel mit setup.py -> ." "." \
+  "$(cd "$RSETUP" && $CP '' 2>/dev/null)"
+
+RPOETRY="$(make_root_repo poetry '[tool.poetry]
+name = "p"
+version = "1.0"')"
+assert_eq "Wurzel mit [tool.poetry] -> ." "." \
+  "$(cd "$RPOETRY" && $CP '' 2>/dev/null)"
+
+# Der wichtigste Abgrenzungsfall: reine Werkzeugkonfiguration in der Wurzel
+# darf ein Monorepo NICHT in ein Einzelpaket verwandeln.
+RTOOL="$(make_root_repo toolonly '[tool.black]
+line-length = 100')"
+assert_eq "Wurzel nur mit [tool.black] -> weiter Monorepo" "alpha" \
+  "$(cd "$RTOOL" && $CP '' 2>/dev/null)"
+
+ROPT="$(make_root_repo optdeps '[project.optional-dependencies]
+dev = ["pytest"]')"
+assert_eq "nur [project.optional-dependencies] -> zaehlt nicht" "alpha" \
+  "$(cd "$ROPT" && $CP '' 2>/dev/null)"
+
+# Mischform: Wurzel-[project] UND ein Paketordner -> die Wurzel gewinnt.
+RMIX="$(make_root_repo mixed '[project]
+name = "m"
+version = "1.0"')"
+assert_eq "Mischform -> Wurzel gewinnt" "." \
+  "$(cd "$RMIX" && $CP '' 2>/dev/null)"
+
+# PACKAGES gewinnt auch gegen die Wurzelerkennung.
+assert_eq "PACKAGES gewinnt gegen die Wurzelerkennung" "alpha" \
+  "$(cd "$RMIX" && PACKAGES='alpha' $CP '' 2>/dev/null)"
+
+# Repo ganz ohne Paket: leere Ausgabe UND ein Hinweis - der stille Leerlauf
+# war der eigentliche Fehler.
+RNONE="${TMP}/rootrepo-none"; rm -rf "$RNONE"; mkdir -p "$RNONE/doku"
+echo "nur doku" > "$RNONE/doku/index.md"
+( cd "$RNONE" && git init -q -b main && git config user.email t@e.x && git config user.name T \
+  && git add -A && git commit -q -m init ) >/dev/null
+assert_eq "Repo ohne Paket -> leere Ausgabe" "" \
+  "$(cd "$RNONE" && $CP '' 2>/dev/null)"
+assert_contains "Repo ohne Paket -> Hinweis auf stderr" \
+  "$(cd "$RNONE" && $CP '' 2>&1 >/dev/null)" "keine Paketordner"
+
+# Mit PACKAGES hat der Aufrufer die Liste bewusst vorgegeben - kein Hinweis.
+if grep -q 'keine Paketordner' <<<"$(cd "$RNONE" && PACKAGES='x' $CP '' 2>&1 >/dev/null)"; then
+  nok "PACKAGES gesetzt -> kein Hinweis" "Hinweis erschien trotzdem"
+else ok "PACKAGES gesetzt -> kein Hinweis"; fi
 
 echo
 echo "=== Bilanz ==="

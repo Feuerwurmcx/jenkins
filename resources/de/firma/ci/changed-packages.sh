@@ -7,6 +7,8 @@
 # setup.cfg - genau das, was build-sdist.sh auch bauen kann (kein
 # __init__.py: das war ein Erbe der alten RAW/tar.gz-Generation, siehe
 # Nachtrag in docs/superpowers/specs/2026-09-03-pymonorepo-shared-library-design.md).
+# Hat die Repo-Wurzel selbst solche Metadaten, gilt das ganze Repo als EIN
+# Paket namens ".", und die Suche nach Unterordnern entfaellt.
 # Statt der Auto-Erkennung eine feste Liste:
 #
 #   PACKAGES="paket1 paket2" changed-packages.sh <base>
@@ -22,6 +24,22 @@ set -euo pipefail
 shopt -s nullglob
 
 BASE="${1:-}"
+
+# Hat die Repo-Wurzel selbst Paket-Metadaten? Dann ist das Repo EIN Paket und
+# kein Monorepo mit Paketordnern - so gebaut sind z. B. Repos mit src-Layout,
+# bei denen die Unterordner von src/ Import-Pakete derselben Distribution sind
+# und keine eigenen Metadaten haben.
+#
+# Bei pyproject.toml genuegt die blosse Datei nicht: sie enthaelt oft nur
+# Werkzeugkonfiguration ([tool.black], [tool.ruff]) und steht dann auch in
+# einem echten Monorepo in der Wurzel. Erst ein [project]- oder
+# [tool.poetry]-Abschnitt macht daraus ein Distributionspaket. Die Muster sind
+# verankert, damit [project.optional-dependencies] allein nicht zaehlt.
+root_is_package() {
+  [[ -f setup.py || -f setup.cfg ]] && return 0
+  [[ -f pyproject.toml ]] || return 1
+  grep -qE '^[[:space:]]*\[(project|tool\.poetry)\][[:space:]]*$' pyproject.toml
+}
 
 all_packages() {
   # PACKAGES gesetzt, aber leer (PACKAGES=""): faellt bewusst auf die
@@ -45,13 +63,31 @@ all_packages() {
     fi
     return
   fi
-  local d
-  for d in */; do
-    d="${d%/}"
-    if [[ -f "$d/pyproject.toml" || -f "$d/setup.py" || -f "$d/setup.cfg" ]]; then
-      printf '%s\n' "$d"
-    fi
-  done | sort -u
+  if root_is_package; then
+    printf '%s\n' '.'
+    return
+  fi
+  local d found
+  found="$(
+    for d in */; do
+      d="${d%/}"
+      if [[ -f "$d/pyproject.toml" || -f "$d/setup.py" || -f "$d/setup.cfg" ]]; then
+        printf '%s\n' "$d"
+      fi
+    done | sort -u
+  )"
+  if [[ -z "$found" ]]; then
+    # Der stille Leerlauf war der eigentliche Fehler: ein Repo, das nichts
+    # baut, war bisher nicht von einem Repo ohne Aenderungen zu unterscheiden.
+    # Exit-Code bleibt 0 - ein Repo ohne Pakete ist kein Fehler.
+    echo "HINWEIS: keine Paketordner und keine Paket-Metadaten in der" >&2
+    echo "         Repo-Wurzel gefunden - es wird nichts gebaut. Erwartet" >&2
+    echo "         werden entweder Top-Level-Ordner mit pyproject.toml," >&2
+    echo "         setup.py oder setup.cfg, oder dieselben Metadaten in der" >&2
+    echo "         Repo-Wurzel." >&2
+    return
+  fi
+  printf '%s\n' "$found"
 }
 
 usable_base() {
@@ -79,6 +115,18 @@ CHANGED_FILES="$(git -c core.quotepath=false diff --no-renames --name-only "$BAS
 if grep -qE '^(ci/|Jenkinsfile$)' <<<"$CHANGED_FILES"; then
   echo "HINWEIS: CI-Konfiguration geaendert - baue alle Pakete" >&2
   all_packages
+  exit 0
+fi
+
+# Beim Einzelpaket zaehlt jede geaenderte Datei: die Zuordnung ueber die erste
+# Pfadkomponente gibt es dort nicht, das Paket IST das Repo. Genau daran
+# scheitert der Umweg ueber PACKAGES='.' - die Schnittmenge enthaelt nie '.'.
+# Die PACKAGES-Pruefung steht davor, damit eine explizit gesetzte Liste auch
+# hier gewinnt.
+if [[ -z "${PACKAGES:-}" ]] && root_is_package; then
+  if [[ -n "$CHANGED_FILES" ]]; then
+    printf '%s\n' '.'
+  fi
   exit 0
 fi
 

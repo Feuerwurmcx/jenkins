@@ -182,9 +182,11 @@ Temp-Dateien existieren.
 
 Ausserdem, im Zusammenhang mit (a): curl-Fehler enden mit Exit 1, nicht mit
 curls rohem Exit-Code (Abschluss-Review I-1). curl benutzt 2 und 3 fuer eigene
-Fehler (z. B. 3 = URL malformed), und genau diese Zahlen sind hier bereits als
-"Version existiert" bzw. "falscher Repo-Typ" vergeben - ein Aufrufer, der auf
-2/3 prueft, wuerde sonst bei einem curl-Fehler den falschen Schluss ziehen.
+Fehler (z. B. 3 = URL malformed), und genau diese Zahlen waren hier zum
+Zeitpunkt dieses Nachtrags bereits als "Version existiert" bzw. "falscher
+Repo-Typ" vergeben (Exit 2 ist seither entfallen, vergeben ist nur noch Exit 3
+- siehe Nachtrag unten) - ein Aufrufer, der auf 2/3 prueft, wuerde sonst bei
+einem curl-Fehler den falschen Schluss ziehen.
 curls Exit-Code steht seither nur noch in der Fehlermeldung
 ("`FEHLER: curl scheiterte (curl-Exit <n>)`"), nicht mehr im Exit-Code des
 Skripts. Die Tabelle im Abschnitt "Upload" und Zeile 42 dieser Spec sind

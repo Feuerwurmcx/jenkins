@@ -29,7 +29,8 @@ laeuft:
 * `bash` (die Skripte selbst; `/bin/bash` reicht, auch die alte 3.2 von macOS)
 * `git` (`changed-packages.sh`)
 * `tar` (`build-sdist.sh`, `sdist-meta.sh`)
-* `curl` (`publish-pypi.sh`, Repo-Typ-Check und Upload gegen die Nexus-REST-API)
+* `curl` (`publish-pypi.sh`, Repo-Typ-Check, Simple-Index-Abfrage vor dem
+  Upload und der Upload selbst - alle drei gegen die Nexus-REST-API)
 * `python3` mit `build` (`python3 -m pip install --user build`) oder ersatzweise
   `setuptools` (`build-sdist.sh` faellt sonst auf `setup.py sdist` zurueck);
   `publish-pypi.sh` braucht ausserdem nacktes `python3` (Stdlib genuegt) fuer
@@ -213,7 +214,13 @@ Wird dieselbe Version erneut gebaut - ein Re-Run, oder ein Monorepo-Build, in
 dem sich nur eines von mehreren Paketen geaendert hat -, laedt
 `publish-pypi.sh` nicht erneut hoch. Vor dem Upload fragt es den Simple-Index
 des Ziel-Repos (`/repository/<repo>/simple/<name>/`, dieselbe API, die auch pip
-liest). Ist der Dateiname dort gelistet, meldet das Skript
+liest). `<name>` ist dabei PEP-503-normalisiert, nicht der rohe Paketname: alles
+klein, und `-`, `_` und `.` in beliebiger Wiederholung zu einem einzelnen `-`.
+Aus `Mein.Tolles_Paket` wird so `mein-tolles-paket` fuer die Index-URL - eine
+andere Normalisierung als die setuptools-Normalisierung im Dateinamen weiter
+oben (`mein_tolles_paket-...`, mit Unterstrich).
+
+Ist der Dateiname dort gelistet, meldet das Skript
 
     SKIP: mein_paket-1.2.3.tar.gz liegt bereits in pypi-hosted
 
@@ -222,8 +229,9 @@ Teilzeichenkette - sonst wuerde ein gelistetes `...tar.gz.asc` faelschlich als
 Treffer zaehlen.
 
 Die Pruefung ist eine Abkuerzung, kein Gate. Laesst sich der Index nicht
-abfragen - fehlende Rechte, unerwarteter Status, curl scheitert -, wird nur
-gewarnt und normal hochgeladen. Lehnt Nexus den Upload dann mit HTTP 400 und
+abfragen - fehlende Rechte, unerwarteter Status, curl scheitert - oder laesst
+sich der Paketname selbst nicht aus der sdist lesen, wird nur gewarnt und
+normal hochgeladen. Lehnt Nexus den Upload dann mit HTTP 400 und
 `already exists` bzw. `does not allow updating` ab, gilt dasselbe: Datei liegt
 im Repo, Exit-Code 0, `SKIP`-Meldung. Das deckt auch den Fall ab, dass zwei
 Builds gleichzeitig dieselbe Version hochladen wollen.

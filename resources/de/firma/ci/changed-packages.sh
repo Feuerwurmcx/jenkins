@@ -163,6 +163,12 @@ TOUCHED="$(cut -d/ -f1 <<<"$CHANGED_FILES" | sort -u)"
 
 while IFS= read -r pkg; do
   [[ -n "$pkg" ]] || continue
+  # '.' ist das Repo selbst - es taucht in TOUCHED nie auf. Jede geaenderte
+  # Datei zaehlt dafuer, genau wie im Auto-Erkennungszweig oben.
+  if [[ "$pkg" == "." ]]; then
+    [[ -n "$CHANGED_FILES" ]] && printf '%s\n' '.'
+    continue
+  fi
   if grep -qxF "$pkg" <<<"$TOUCHED"; then
     printf '%s\n' "$pkg"
   fi

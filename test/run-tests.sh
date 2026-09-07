@@ -1575,6 +1575,12 @@ assert_eq "Wurzel mit [project] -> ." "." \
 assert_eq "Einzelpaket, Datei unter src/ geaendert -> ." "." \
   "$(cd "$SREPO" && $CP HEAD~1 2>/dev/null)"
 
+# I-1: der eigentliche Fehlerfall - PACKAGES='.' mit echter Basis. Vorher lief
+# '.' in der Schnittmenge gegen TOUCHED (erste Pfadkomponente) leer, weil '.'
+# dort nie auftaucht - leise Ausgabe, rc 0, nichts gebaut.
+assert_eq "I-1: PACKAGES='.' echte Basis, Datei geaendert -> ." "." \
+  "$(cd "$SREPO" && PACKAGES='.' $CP HEAD~1 2>/dev/null)"
+
 ( cd "$SREPO" && git commit -q --allow-empty -m leer )
 assert_eq "Einzelpaket, nichts geaendert -> leer" "" \
   "$(cd "$SREPO" && $CP HEAD~1 2>/dev/null)"
@@ -1670,6 +1676,12 @@ assert_eq "PACKAGES gewinnt gegen die Wurzelerkennung" "alpha" \
 ( cd "$RMIX" && echo "x" >> alpha/setup.py && git add -A && git commit -q -m "alpha-aenderung" )
 assert_eq "Wurzelpaket + alpha/ geaendert, PACKAGES=alpha -> alpha" "alpha" \
   "$(cd "$RMIX" && PACKAGES='alpha' $CP HEAD~1 2>/dev/null)"
+
+# I-1, Mischform-Fall: PACKAGES='. alpha' darf die Wurzel nicht verlieren -
+# '.' zaehlt genau wie im Auto-Erkennungszweig jede geaenderte Datei, auch
+# wenn nur alpha/ geaendert wurde.
+assert_eq "I-1: Mischform, PACKAGES='. alpha' -> . und alpha" "$(printf '.\nalpha')" \
+  "$(cd "$RMIX" && PACKAGES='. alpha' $CP HEAD~1 2>/dev/null)"
 
 # Repo ganz ohne Paket: leere Ausgabe UND ein Hinweis - der stille Leerlauf
 # war der eigentliche Fehler.

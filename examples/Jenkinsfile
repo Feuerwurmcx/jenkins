@@ -15,5 +15,8 @@ pyMonorepo {
     // Optional, hier mit ihren Defaults:
     // credentialsId = 'nexus-pypi-deploy'  // Username/Password-Credential in Jenkins
     // packages      = ''                   // leer = Auto-Erkennung der Paketordner
+    // rootPackage   = true                 // wenn das Repo SELBST ein Paket ist:
+    //                                      // Metadaten in der Wurzel, Quellcode
+    //                                      // unter src/, keine Paketordner
     // keepBuilds    = 30
 }

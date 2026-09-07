@@ -12,7 +12,8 @@
 //
 //   3) Einzel-Steps, wenn eine Pipeline abweichen muss:
 //        pyMonorepo.install()
-//        def pkgs = pyMonorepo.changedPackages(base)
+//        def pkgs = pyMonorepo.changedPackages(base)          // Monorepo
+//        def pkgs = pyMonorepo.changedPackages(base, '', true) // Repo IST ein Paket
 //        def a = pyMonorepo.buildSdist(pkg); def v = pyMonorepo.meta(a, 'version')
 //        pyMonorepo.publish(archive: a, nexusUrl: '...')
 //        pyMonorepo.cleanup()
@@ -42,6 +43,7 @@ def call(Closure body) {
         hostedRepo   : 'pypi-hosted',
         credentialsId: 'nexus-pypi-deploy',
         packages     : '',
+        rootPackage  : false,
         keepBuilds   : 30,
     ]
     body.resolveStrategy = Closure.DELEGATE_FIRST
@@ -80,6 +82,7 @@ def call(Closure body) {
                         // im post-Block unten.
                         this.build(nexusUrl: cfg.nexusUrl, hostedRepo: cfg.hostedRepo,
                                    credentialsId: cfg.credentialsId, packages: cfg.packages,
+                                   rootPackage: cfg.rootPackage,
                                    buildAll: params.BUILD_ALL, skipUpload: params.SKIP_UPLOAD,
                                    archive: false, cleanup: false)
                     }
@@ -113,7 +116,9 @@ def call(Closure body) {
 //   } } }
 //
 // Argumente (alle ausser nexusUrl optional):
-//   hostedRepo, credentialsId, packages  - wie in der Vollpipeline
+//   hostedRepo, credentialsId, packages, rootPackage  - wie in der Vollpipeline
+//   rootPackage           - Argument gewinnt; fehlt es, params.ROOT_PACKAGE,
+//                           falls die Pipeline ihn hat; sonst false
 //   buildAll, skipUpload  - Argument gewinnt; fehlt es, params.BUILD_ALL /
 //                           params.SKIP_UPLOAD, falls die Pipeline sie hat; sonst false
 //   base                  - Diff-Basis; fehlt sie, wie ueblich berechnet
@@ -127,7 +132,7 @@ def call(Closure body) {
 // aufruft - Steps im finally dieser Methode laufen bei Abbruch/Timeout nicht
 // zuverlaessig. So macht es die Vollpipeline (call()) oben.
 Map build(Map args) {
-    List allowed = ['nexusUrl', 'hostedRepo', 'credentialsId', 'packages', 'buildAll', 'skipUpload', 'base', 'archive', 'cleanup']
+    List allowed = ['nexusUrl', 'hostedRepo', 'credentialsId', 'packages', 'rootPackage', 'buildAll', 'skipUpload', 'base', 'archive', 'cleanup']
     List unknown = []
     for (String k : args.keySet()) {
         if (!(k in allowed)) { unknown << k }
@@ -142,6 +147,7 @@ Map build(Map args) {
     boolean doCleanup  = args.containsKey('cleanup')    ? toBool(args.cleanup, true)     : true
     boolean buildAll   = args.containsKey('buildAll')   ? toBool(args.buildAll, false)   : paramOr('BUILD_ALL', false)
     boolean skipUpload = args.containsKey('skipUpload') ? toBool(args.skipUpload, false) : paramOr('SKIP_UPLOAD', false)
+    boolean rootPackage = args.containsKey('rootPackage') ? toBool(args.rootPackage, false) : paramOr('ROOT_PACKAGE', false)
     String hostedRepo    = args.hostedRepo    ?: 'pypi-hosted'
     String credentialsId = args.credentialsId ?: 'nexus-pypi-deploy'
     Map versions = [:]   // CPS-Branches laufen kooperativ, kein Sync noetig
@@ -149,7 +155,7 @@ Map build(Map args) {
     try {
         install()
         String base = args.containsKey('base') ? (args.base ?: '') : (buildAll ? '' : defaultBase())
-        List pkgs = changedPackages(base, args.packages ?: '')
+        List pkgs = changedPackages(base, args.packages ?: '', rootPackage)
 
         echo "Basis   : ${base ?: '(keine – alles)'}"
         echo "Pakete  : ${pkgs.join(', ') ?: '(keine Änderungen)'}"
@@ -238,15 +244,26 @@ String install() {
 // Geaenderte Pakete seit base; leere Basis heisst "alle". Auto-Erkennung der
 // Paketordner (siehe changed-packages.sh).
 List changedPackages(String base) {
-    return changedPackages(base, '')
+    return changedPackages(base, '', false)
 }
 
 // Wie oben, aber mit fester Paketliste (Leerzeichen-getrennt) statt
 // Auto-Erkennung. Leeres packages = Auto-Erkennung.
 List changedPackages(String base, String packages) {
+    return changedPackages(base, packages, false)
+}
+
+// Wie oben, aber rootPackage=true erklaert das Repo SELBST zum Paket: die
+// Paketliste ist dann genau '.', und jede geaenderte Datei zaehlt dafuer.
+// Fuer Repos mit Metadaten in der Wurzel und Quellcode unter src/, die keine
+// Paketordner haben. Das Skript ERKENNT das nicht von selbst - siehe die
+// Begruendung im Kopf von changed-packages.sh. Ein rootPackage=true zusammen
+// mit einer anderen packages-Liste als '.' bricht dort mit Exit 2 ab.
+List changedPackages(String base, String packages, boolean rootPackage) {
     requireInstalled()
     String out
-    withEnv(["BASE=${base ?: ''}", "PACKAGES=${packages ?: ''}"]) {
+    withEnv(["BASE=${base ?: ''}", "PACKAGES=${packages ?: ''}",
+             "ROOT_PACKAGE=${rootPackage ? 'true' : 'false'}"]) {
         out = sh(returnStdout: true,
                  script: 'bash "$CI_LIB_DIR/changed-packages.sh" "$BASE"').trim()
     }

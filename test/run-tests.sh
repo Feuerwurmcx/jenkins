@@ -278,35 +278,15 @@ fixture_single_repo() {  # -> Pfad auf stdout
   printf '%s\n' "$d"
 }
 
-# Baut ein Wegwerf-Repo mit frei waehlbarem Wurzelinhalt, um die Abgrenzung
-# zwischen echtem Paket und reiner Werkzeugkonfiguration zu pruefen.
-#   make_root_repo <unterordner> <inhalt der pyproject.toml oder "">
-# Legt zusaetzlich immer einen Ordner alpha/ MIT setup.py an, damit sichtbar
-# wird, ob die Wurzelerkennung die Unterordner-Suche verdraengt oder nicht.
-make_root_repo() {  # -> Pfad auf stdout
+# Baut ein Wegwerf-Repo, das BEIDES hat: einen Paketordner alpha/ und
+# optional Inhalt in einer Wurzel-pyproject.toml. Damit wird sichtbar, ob
+# ROOT_PACKAGE die Unterordner-Suche wirklich verdraengt.
+#   make_mixed_repo <unterordner> <inhalt der pyproject.toml oder "">
+make_mixed_repo() {  # -> Pfad auf stdout
   local d="${TMP}/rootrepo-$1"; shift
   rm -rf "$d"; mkdir -p "$d/alpha"
   echo "from setuptools import setup" > "$d/alpha/setup.py"
   if [[ -n "${1:-}" ]]; then printf '%s\n' "$1" > "$d/pyproject.toml"; fi
-  (
-    cd "$d"
-    git init -q -b main
-    git config user.email test@example.com
-    git config user.name Test
-    git add -A
-    git commit -q -m init
-  ) >/dev/null
-  printf '%s\n' "$d"
-}
-
-# Wie make_root_repo, aber der Wurzelinhalt geht in setup.cfg statt
-# pyproject.toml - fuer die Inhaltspruefung von setup.cfg (I-1/I-2).
-#   make_root_setupcfg_repo <unterordner> <inhalt der setup.cfg oder "">
-make_root_setupcfg_repo() {  # -> Pfad auf stdout
-  local d="${TMP}/rootrepo-$1"; shift
-  rm -rf "$d"; mkdir -p "$d/alpha"
-  echo "from setuptools import setup" > "$d/alpha/setup.py"
-  if [[ -n "${1:-}" ]]; then printf '%s\n' "$1" > "$d/setup.cfg"; fi
   (
     cd "$d"
     git init -q -b main
@@ -797,7 +777,7 @@ $BAD_BARE"; fi
     ok "build() enthaelt keinen pipeline{}-Block"
   else nok "build() enthaelt keinen pipeline{}-Block" "Rumpf leer oder pipeline{} gefunden"; fi
   assert_contains "build() kennt die erlaubten Schluessel" "$BUILD_MAP_BODY" \
-    "['nexusUrl', 'hostedRepo', 'credentialsId', 'packages', 'buildAll', 'skipUpload', 'base', 'archive', 'cleanup']"
+    "['nexusUrl', 'hostedRepo', 'credentialsId', 'packages', 'rootPackage', 'buildAll', 'skipUpload', 'base', 'archive', 'cleanup']"
   assert_contains "build() lehnt unbekannte Schluessel ab" "$BUILD_MAP_BODY" 'unbekannte Argumente'
   assert_contains "build(): Stage-Label fuer das Wurzelpaket" "$BUILD_MAP_BODY" "Wurzelpaket"
   for NEEDLE in "stage(pkg == '.' ? 'Wurzelpaket' : pkg)" \
@@ -893,14 +873,28 @@ $BAD_BARE"; fi
   #     nicht unbemerkt aus einem Step verschwinden koennen.
   CP1_BODY="$(step_body 'List changedPackages(String base)')"
   CP2_BODY="$(step_body 'List changedPackages(String base, String packages)')"
+  CP3_BODY="$(step_body 'List changedPackages(String base, String packages, boolean rootPackage)')"
   BUILD_BODY="$(step_body 'String buildSdist(String pkg)')"
   PUBLISH_BODY="$(step_body 'void publish(Map args)')"
   INSTALL_BODY="$(step_body 'String install()')"
-  assert_contains "changedPackages(base, packages) prueft requireInstalled()" "$CP2_BODY" 'requireInstalled()'
+  assert_contains "changedPackages(base, packages, rootPackage) prueft requireInstalled()" "$CP3_BODY" 'requireInstalled()'
   assert_contains "buildSdist() prueft requireInstalled()" "$BUILD_BODY" 'requireInstalled()'
   assert_contains "meta() prueft requireInstalled()" "$META_BODY" 'requireInstalled()'
   assert_contains "publish() prueft requireInstalled()" "$PUBLISH_BODY" 'requireInstalled()'
-  assert_contains "changedPackages(base) delegiert an changedPackages(base, packages)" "$CP1_BODY" "changedPackages(base, '')"
+  assert_contains "changedPackages(base) delegiert weiter" "$CP1_BODY" "changedPackages(base, '', false)"
+  assert_contains "changedPackages(base, packages) delegiert weiter" "$CP2_BODY" "changedPackages(base, packages, false)"
+
+  # ROOT_PACKAGE-Kette: der Schalter muss vom Argument bis in die Umgebung
+  # des Skripts durchkommen. Bricht die Kette an einer Stelle, faellt das
+  # Repo still auf "kein Wurzelpaket" zurueck und baut nichts.
+  assert_contains "changedPackages() reicht ROOT_PACKAGE per withEnv weiter" "$CP3_BODY" \
+    "ROOT_PACKAGE=\${rootPackage ? 'true' : 'false'}"
+  assert_contains "build() wertet rootPackage aus (Argument vor params)" "$BUILD_MAP_BODY" \
+    "args.containsKey('rootPackage') ? toBool(args.rootPackage, false) : paramOr('ROOT_PACKAGE', false)"
+  assert_contains "build() reicht rootPackage an changedPackages() weiter" "$BUILD_MAP_BODY" \
+    "changedPackages(base, args.packages ?: '', rootPackage)"
+  assert_contains "Vollpipeline kennt die Konfiguration rootPackage" "$CODE" 'rootPackage  : false,'
+  assert_contains "Vollpipeline reicht cfg.rootPackage an build() weiter" "$CODE" 'rootPackage: cfg.rootPackage'
   assert_contains "install() nutzt libDir()" "$INSTALL_BODY" 'libDir()'
 
   # I-4(a): Groovy<->Shell-Kopplung. Die ganze withEnv-Disziplin beruht
@@ -1560,181 +1554,121 @@ assert_contains "400 trotz Vorabpruefung -> Herkunft ist der 400-Pfad" \
 skip "publish-pypi.sh echter Netzwerk-Upload" "braucht ein erreichbares Nexus - bewusst nicht getestet"
 
 echo
-echo "=== changed-packages.sh: Einzelpaket-Repos ==="
+echo "=== changed-packages.sh: ROOT_PACKAGE (Repo ist selbst ein Paket) ==="
 CP="bash $SCRIPTS/changed-packages.sh"
 
-# Achtung: eine LEERE Ausgabe ist der heutige Zustand und beweist nichts.
+# Achtung: eine LEERE Ausgabe ist der Default-Zustand und beweist nichts.
 # Jeder Einzelpaket-Fall prueft deshalb auf die exakte Ausgabe '.'.
 SREPO="$(fixture_single_repo)"
-assert_eq "Wurzel mit [project] -> ." "." \
+
+# Der Kern des Schalters: DASSELBE Repo, einmal ohne und einmal mit
+# ROOT_PACKAGE. Ohne den Schalter gibt es keine Erkennung - eine
+# Wurzel-pyproject.toml mit [project] macht fuer sich genommen kein Paket.
+# Diese beiden Zeilen zusammen sind der Beweis, dass entschieden und nicht
+# geraten wird; einzeln beweist keine von beiden etwas.
+assert_eq "ohne ROOT_PACKAGE: Wurzel-[project] zaehlt NICHT" "" \
   "$(cd "$SREPO" && $CP '' 2>/dev/null)"
+assert_eq "ROOT_PACKAGE=true -> ." "." \
+  "$(cd "$SREPO" && ROOT_PACKAGE=true $CP '' 2>/dev/null)"
 
 # Eine Aenderung irgendwo im Repo zaehlt fuer das eine Paket - die Zuordnung
 # ueber die erste Pfadkomponente gibt es hier nicht.
 ( cd "$SREPO" && echo "x" >> src/einzelpaket/__init__.py && git add -A && git commit -q -m aenderung )
-assert_eq "Einzelpaket, Datei unter src/ geaendert -> ." "." \
+OUT_RP="$(cd "$SREPO" && ROOT_PACKAGE=true $CP HEAD~1 2>/dev/null)"; RC_RP=$?
+assert_eq "ROOT_PACKAGE, Datei unter src/ geaendert -> ." "." "$OUT_RP"
+assert_rc "ROOT_PACKAGE, echte Basis -> rc 0" 0 "$RC_RP"
+assert_eq "ohne ROOT_PACKAGE, echte Basis -> leer" "" \
   "$(cd "$SREPO" && $CP HEAD~1 2>/dev/null)"
 
-# I-1: der eigentliche Fehlerfall - PACKAGES='.' mit echter Basis. Vorher lief
-# '.' in der Schnittmenge gegen TOUCHED (erste Pfadkomponente) leer, weil '.'
-# dort nie auftaucht - leise Ausgabe, rc 0, nichts gebaut.
-assert_eq "I-1: PACKAGES='.' echte Basis, Datei geaendert -> ." "." \
+# PACKAGES='.' sagt dasselbe wie ROOT_PACKAGE und muss weiter funktionieren:
+# '.' lief frueher in der Schnittmenge gegen TOUCHED (erste Pfadkomponente)
+# leer, weil '.' dort nie auftaucht - leise Ausgabe, rc 0, nichts gebaut.
+assert_eq "PACKAGES='.' echte Basis, Datei geaendert -> ." "." \
   "$(cd "$SREPO" && PACKAGES='.' $CP HEAD~1 2>/dev/null)"
 
 ( cd "$SREPO" && git commit -q --allow-empty -m leer )
-assert_eq "Einzelpaket, nichts geaendert -> leer" "" \
-  "$(cd "$SREPO" && $CP HEAD~1 2>/dev/null)"
+assert_eq "ROOT_PACKAGE, nichts geaendert -> leer" "" \
+  "$(cd "$SREPO" && ROOT_PACKAGE=true $CP HEAD~1 2>/dev/null)"
 
-# setup.py in der Wurzel genuegt, ohne pyproject.toml.
-RSETUP="$(make_root_repo setuppy "")"
-( cd "$RSETUP" && echo "from setuptools import setup" > setup.py && git add -A && git commit -q -m setup )
-assert_eq "Wurzel mit setup.py -> ." "." \
-  "$(cd "$RSETUP" && $CP '' 2>/dev/null)"
+# Schreibweisen. Ein Boolean-Parameter kommt aus Jenkins als String herein,
+# und Menschen schreiben ihn unterschiedlich.
+for v in true TRUE True 1 yes on ja " true "; do
+  assert_eq "ROOT_PACKAGE='$v' -> ." "." \
+    "$(cd "$SREPO" && ROOT_PACKAGE="$v" $CP '' 2>/dev/null)"
+done
+for v in false FALSE 0 no off nein ""; do
+  # Der rc gehoert dazu: ein Abbruch mit rc 2 liefert AUCH leeres stdout.
+  # Ohne assert_rc bliebe eine Verwechslung von "aus" und "unverstanden"
+  # unbemerkt gruen - genau das hat die Mutationsprobe aufgedeckt.
+  OFF_OUT="$(cd "$SREPO" && ROOT_PACKAGE="$v" $CP '' 2>/dev/null)"; OFF_RC=$?
+  assert_eq "ROOT_PACKAGE='$v' -> aus" "" "$OFF_OUT"
+  assert_rc "ROOT_PACKAGE='$v' -> rc 0, kein Abbruch" 0 "$OFF_RC"
+done
 
-# I-1/I-2: eine Wurzel-setup.cfg mit nur Linter-Konfiguration ist in
-# Python-Monorepos verbreitet und darf kein Einzelpaket erzwingen.
-RCFGFLAKE="$(make_root_setupcfg_repo cfgflake8 '[flake8]
-max-line-length = 100')"
-assert_eq "Wurzel-setup.cfg nur [flake8] -> weiter Monorepo" "alpha" \
-  "$(cd "$RCFGFLAKE" && $CP '' 2>/dev/null)"
+# Ein unverstandener Wert bricht ab, statt still als "aus" zu gelten: sonst
+# baut ein Einzelpaket-Repo wegen eines Tippfehlers nichts und bleibt gruen.
+OUT_TYPO="$(cd "$SREPO" && ROOT_PACKAGE=ture $CP '' 2>/dev/null)"; RC_TYPO=$?
+assert_rc "ROOT_PACKAGE=ture (Tippfehler) -> rc 2" 2 "$RC_TYPO"
+assert_eq "ROOT_PACKAGE=ture -> keine Ausgabe auf stdout" "" "$OUT_TYPO"
+assert_contains "ROOT_PACKAGE=ture -> Fehlermeldung nennt den Wert" \
+  "$(cd "$SREPO" && ROOT_PACKAGE=ture $CP '' 2>&1 >/dev/null)" "ROOT_PACKAGE='ture'"
 
-# Erst [metadata] bzw. [options] macht aus setup.cfg Paket-Metadaten.
-RCFGMETA="$(make_root_setupcfg_repo cfgmeta '[metadata]
-name = m')"
-assert_eq "Wurzel-setup.cfg mit [metadata] -> ." "." \
-  "$(cd "$RCFGMETA" && $CP '' 2>/dev/null)"
+# ROOT_PACKAGE und eine abweichende PACKAGES-Liste widersprechen sich. Still
+# eines von beiden zu bevorzugen hiesse, die Haelfte der erwarteten Pakete
+# ohne Meldung zu verlieren.
+OUT_CONF="$(cd "$SREPO" && ROOT_PACKAGE=true PACKAGES='alpha' $CP '' 2>/dev/null)"; RC_CONF=$?
+assert_rc "ROOT_PACKAGE + PACKAGES='alpha' -> rc 2" 2 "$RC_CONF"
+assert_eq "ROOT_PACKAGE + PACKAGES='alpha' -> keine Ausgabe" "" "$OUT_CONF"
+assert_contains "ROOT_PACKAGE + PACKAGES -> Meldung nennt beide" \
+  "$(cd "$SREPO" && ROOT_PACKAGE=true PACKAGES='alpha' $CP '' 2>&1 >/dev/null)" \
+  "widersprechen sich"
 
-# Dieselbe Toleranz wie bei pyproject.toml: configparser erlaubt Leerraum um
-# den Abschnittsnamen und einen Kommentar dahinter, eine strengere Pruefung
-# wuerde ein echtes Einzelpaket lautlos auf "kein Paket" fallen lassen.
-RCFGSPACED="$(make_root_setupcfg_repo cfgspaced '[ metadata ]
-name = s')"
-assert_eq "Wurzel-setup.cfg mit [ metadata ] -> ." "." \
-  "$(cd "$RCFGSPACED" && $CP '' 2>/dev/null)"
+# PACKAGES='.' ist gleichbedeutend und deshalb vertraeglich.
+assert_eq "ROOT_PACKAGE + PACKAGES='.' -> ." "." \
+  "$(cd "$SREPO" && ROOT_PACKAGE=true PACKAGES='.' $CP '' 2>/dev/null)"
+# Nur-Leerraum-PACKAGES ist keine Liste und damit kein Widerspruch.
+assert_eq "ROOT_PACKAGE + PACKAGES='   ' -> ." "." \
+  "$(cd "$SREPO" && ROOT_PACKAGE=true PACKAGES='   ' $CP '' 2>/dev/null)"
 
-RCFGCOMMENT="$(make_root_setupcfg_repo cfgcomment '[metadata]  # Kommentar
-name = c')"
-assert_eq "Wurzel-setup.cfg mit [metadata]  # Kommentar -> ." "." \
-  "$(cd "$RCFGCOMMENT" && $CP '' 2>/dev/null)"
+# Der Hinweis nennt den Grund im Log. Muss GENAU EINMAL erscheinen und darf
+# NICHT auf stdout landen (stdout ist die Paketliste, sie wird von
+# 'sh(returnStdout: true)' gelesen - eine Zeile zu viel bricht die Pipeline).
+HINT_RP="$(cd "$SREPO" && ROOT_PACKAGE=true $CP '' 2>&1 >/dev/null)"
+assert_contains "ROOT_PACKAGE -> Hinweis auf stderr" "$HINT_RP" \
+  "ROOT_PACKAGE gesetzt - das Repo gilt als EIN Paket"
+assert_eq "ROOT_PACKAGE -> Hinweis erscheint genau einmal" "1" \
+  "$(grep -c 'ROOT_PACKAGE gesetzt' <<<"$HINT_RP")"
+assert_eq "ROOT_PACKAGE -> stdout bleibt exakt '.'" "." \
+  "$(cd "$SREPO" && ROOT_PACKAGE=true $CP '' 2>/dev/null)"
 
-# [options.extras_require] und [metadata.foo] zaehlen weiterhin NICHT: dort
-# folgt auf den Abschnittsnamen kein "]", sondern ein ".".
-RCFGEXTRAS="$(make_root_setupcfg_repo cfgextras '[options.extras_require]
-dev = pytest')"
-assert_eq "nur [options.extras_require] -> weiter Monorepo" "alpha" \
-  "$(cd "$RCFGEXTRAS" && $CP '' 2>/dev/null)"
-
-RCFGMETAFOO="$(make_root_setupcfg_repo cfgmetafoo '[metadata.foo]
-bar = baz')"
-assert_eq "nur [metadata.foo] -> weiter Monorepo" "alpha" \
-  "$(cd "$RCFGMETAFOO" && $CP '' 2>/dev/null)"
-
-RPOETRY="$(make_root_repo poetry '[tool.poetry]
-name = "p"
-version = "1.0"')"
-assert_eq "Wurzel mit [tool.poetry] -> ." "." \
-  "$(cd "$RPOETRY" && $CP '' 2>/dev/null)"
-
-# Der wichtigste Abgrenzungsfall: reine Werkzeugkonfiguration in der Wurzel
-# darf ein Monorepo NICHT in ein Einzelpaket verwandeln.
-RTOOL="$(make_root_repo toolonly '[tool.black]
-line-length = 100')"
-assert_eq "Wurzel nur mit [tool.black] -> weiter Monorepo" "alpha" \
-  "$(cd "$RTOOL" && $CP '' 2>/dev/null)"
-
-ROPT="$(make_root_repo optdeps '[project.optional-dependencies]
-dev = ["pytest"]')"
-assert_eq "nur [project.optional-dependencies] -> zaehlt nicht" "alpha" \
-  "$(cd "$ROPT" && $CP '' 2>/dev/null)"
-
-# Mi-1: das Muster darf gueltiges TOML nicht verwerfen - weder ein Kommentar
-# hinter der Abschnittsklammer noch Leerraum innerhalb der Klammern.
-RCOMMENT="$(make_root_repo comment '[project]  # Kommentar
-name = "c"')"
-assert_eq "Wurzel mit [project]  # Kommentar -> ." "." \
-  "$(cd "$RCOMMENT" && $CP '' 2>/dev/null)"
-
-RSPACED="$(make_root_repo spaced '[ project ]
-name = "s"')"
-assert_eq "Wurzel mit [ project ] -> ." "." \
-  "$(cd "$RSPACED" && $CP '' 2>/dev/null)"
-
-# Mischform: Wurzel-[project] UND ein Paketordner -> die Wurzel gewinnt.
-RMIX="$(make_root_repo mixed '[project]
+# ROOT_PACKAGE verdraengt die Ordnersuche: ein Repo mit Paketordner alpha/
+# meldet mit dem Schalter nur noch '.'. Ohne ihn bleibt es ein Monorepo -
+# auch mit [project] in der Wurzel.
+RMIX="$(make_mixed_repo mixed '[project]
 name = "m"
 version = "1.0"')"
-assert_eq "Mischform -> Wurzel gewinnt" "." \
+assert_eq "ROOT_PACKAGE verdraengt den Paketordner alpha/" "." \
+  "$(cd "$RMIX" && ROOT_PACKAGE=true $CP '' 2>/dev/null)"
+assert_eq "ohne ROOT_PACKAGE bleibt es ein Monorepo" "alpha" \
   "$(cd "$RMIX" && $CP '' 2>/dev/null)"
 
-# PACKAGES gewinnt auch gegen die Wurzelerkennung.
-assert_eq "PACKAGES gewinnt gegen die Wurzelerkennung" "alpha" \
-  "$(cd "$RMIX" && PACKAGES='alpha' $CP '' 2>/dev/null)"
-
-# I-3: PACKAGES-Vorrang im Schnittmengen-Zweig (nicht in all_packages()) -
-# braucht Wurzelpaket-Metadaten UND einen Paketordner UND eine brauchbare
-# Basis, damit der Code ueberhaupt in den Schnittmengen-Zweig laeuft.
+# Auch im Schnittmengen-Zweig (echte Basis) verdraengt der Schalter die
+# Ordnerzuordnung: geaendert wurde nur alpha/, gemeldet wird trotzdem '.'.
 ( cd "$RMIX" && echo "x" >> alpha/setup.py && git add -A && git commit -q -m "alpha-aenderung" )
-assert_eq "Wurzelpaket + alpha/ geaendert, PACKAGES=alpha -> alpha" "alpha" \
-  "$(cd "$RMIX" && PACKAGES='alpha' $CP HEAD~1 2>/dev/null)"
+assert_eq "ROOT_PACKAGE, echte Basis, nur alpha/ geaendert -> ." "." \
+  "$(cd "$RMIX" && ROOT_PACKAGE=true $CP HEAD~1 2>/dev/null)"
+assert_eq "ohne ROOT_PACKAGE, echte Basis, alpha/ geaendert -> alpha" "alpha" \
+  "$(cd "$RMIX" && $CP HEAD~1 2>/dev/null)"
 
-# I-1, Mischform-Fall: PACKAGES='. alpha' darf die Wurzel nicht verlieren -
-# '.' zaehlt genau wie im Auto-Erkennungszweig jede geaenderte Datei, auch
-# wenn nur alpha/ geaendert wurde.
-assert_eq "I-1: Mischform, PACKAGES='. alpha' -> . und alpha" "$(printf '.\nalpha')" \
+# PACKAGES='. alpha' (ohne ROOT_PACKAGE) darf die Wurzel nicht verlieren:
+# '.' zaehlt jede geaenderte Datei, auch wenn nur alpha/ geaendert wurde.
+assert_eq "PACKAGES='. alpha' -> . und alpha" "$(printf '.\nalpha')" \
   "$(cd "$RMIX" && PACKAGES='. alpha' $CP HEAD~1 2>/dev/null)"
 
-# I-3/M-7: root_is_package() nennt seinen Ausloeser auf stderr - ohne das war
-# "Repo gilt als ein Paket" nur indirekt sichtbar (Pakete : ., Stage
-# Wurzelpaket), nie der Grund. Muss GENAU EINMAL erscheinen und darf NICHT
-# auf stdout landen (stdout ist die Paketliste, sie wird von
-# 'sh(returnStdout: true)' gelesen).
-HINT_ERR_TOML="$(cd "$SREPO" && $CP '' 2>&1 >/dev/null)"
-assert_contains "I-3/M-7: Ausloeser pyproject.toml auf stderr" \
-  "$HINT_ERR_TOML" "Paket-Metadaten in der Repo-Wurzel (pyproject.toml)"
-assert_eq "I-3/M-7: Hinweis erscheint genau einmal" "1" \
-  "$(grep -c 'Paket-Metadaten in der Repo-Wurzel' <<<"$HINT_ERR_TOML")"
-assert_eq "I-3/M-7: stdout bleibt exakt '.' trotz Hinweis auf stderr" "." \
-  "$(cd "$SREPO" && $CP '' 2>/dev/null)"
-
-HINT_ERR_SETUPPY="$(cd "$RSETUP" && $CP '' 2>&1 >/dev/null)"
-assert_contains "I-3/M-7: Ausloeser setup.py auf stderr" \
-  "$HINT_ERR_SETUPPY" "Paket-Metadaten in der Repo-Wurzel (setup.py)"
-
-HINT_ERR_CFG="$(cd "$RCFGMETA" && $CP '' 2>&1 >/dev/null)"
-assert_contains "I-3/M-7: Ausloeser setup.cfg auf stderr" \
-  "$HINT_ERR_CFG" "Paket-Metadaten in der Repo-Wurzel (setup.cfg)"
-
-# M-1: die Verankerung (^...$) muss [project]/[metadata] mitten in einer
-# Kommentar-/Textzeile verwerfen - fuer BEIDE Formate (Laborfall E).
-RMIDTEXT="$(make_root_repo midtext '[tool.black]
-# jedes Paket hat seinen eigenen [project]-Abschnitt
-line-length = 100')"
-assert_eq "M-1: [project] mitten im Kommentar -> weiter Monorepo" "alpha" \
-  "$(cd "$RMIDTEXT" && $CP '' 2>/dev/null)"
-
-RCFGMIDTEXT="$(make_root_setupcfg_repo cfgmidtext '[flake8]
-max-line-length = 100
-# das Wurzelpaket hat kein eigenes [metadata]')"
-assert_eq "M-1: [metadata] mitten in einer Textzeile -> weiter Monorepo" "alpha" \
-  "$(cd "$RCFGMIDTEXT" && $CP '' 2>/dev/null)"
-
-# M-2: [options] allein (ohne [metadata]) macht aus setup.cfg Paket-Metadaten.
-RCFGOPTIONS="$(make_root_setupcfg_repo cfgoptions '[options]
-packages = find:')"
-assert_eq "M-2: Wurzel-setup.cfg mit nur [options] -> ." "." \
-  "$(cd "$RCFGOPTIONS" && $CP '' 2>/dev/null)"
-
-# M-3: der Exit-Code des Einzelpaket-Zweigs (echte Basis) ist bisher
-# ungeprueft - alle Assertions verglichen nur stdout.
-OUT_M3="$(cd "$SREPO" && $CP HEAD~1 2>/dev/null)"; RC_M3=$?
-assert_rc "M-3: Einzelpaket, echte Basis -> rc 0" 0 "$RC_M3"
-
-# M-4: TOML ist case-sensitiv - [PROJECT] ist eine andere Tabelle als
-# [project] und darf NICHT zaehlen.
-RCASE="$(make_root_repo caseinsens '[PROJECT]
-name = "x"')"
-assert_eq "M-4: [PROJECT] (Grossschreibung) -> weiter Monorepo" "alpha" \
-  "$(cd "$RCASE" && $CP '' 2>/dev/null)"
+# CI-Aenderung baut alles - beim Einzelpaket ist "alles" genau '.'.
+( cd "$SREPO" && mkdir -p ci && echo "x" > ci/irgendwas.sh && git add -A && git commit -q -m ci )
+assert_eq "ROOT_PACKAGE + CI-Aenderung -> ." "." \
+  "$(cd "$SREPO" && ROOT_PACKAGE=true $CP HEAD~1 2>/dev/null)"
 
 # Repo ganz ohne Paket: leere Ausgabe UND ein Hinweis - der stille Leerlauf
 # war der eigentliche Fehler.

@@ -73,6 +73,7 @@ Versionsangabe im Jenkinsfile an das anpassen, was tatsaechlich existiert
 | `hostedRepo` | nein | `pypi-hosted` | HOSTED-Repo, nie die Group |
 | `credentialsId` | nein | `nexus-pypi-deploy` | Username/Password-Credential |
 | `packages` | nein | `''` | Feste Paketliste; leer heisst Auto-Erkennung |
+| `rootPackage` | nein | `false` | Das Repo IST ein Paket (Metadaten in der Wurzel) |
 | `keepBuilds` | nein | `30` | wie viele Builds aufgehoben werden |
 
 Fehlt `nexusUrl`, bricht die Pipeline sofort ab statt erst beim Upload.
@@ -130,6 +131,7 @@ Vollstaendiges Beispiel: `examples/Jenkinsfile.embedded`.
 | `hostedRepo` | nein | `pypi-hosted` | HOSTED-Repo, nie die Group |
 | `credentialsId` | nein | `nexus-pypi-deploy` | Username/Password-Credential |
 | `packages` | nein | `''` | feste Paketliste; leer = Auto-Erkennung |
+| `rootPackage` | nein | `params.ROOT_PACKAGE`, sonst `false` | Repo ist selbst ein Paket -> Liste ist `.` |
 | `buildAll` | nein | `params.BUILD_ALL`, sonst `false` | alles bauen |
 | `skipUpload` | nein | `params.SKIP_UPLOAD`, sonst `false` | Dry-Run |
 | `base` | nein | berechnet, bei `buildAll: true` immer `''` | Diff-Basis (`GIT_PREVIOUS_SUCCESSFUL_COMMIT`, sonst `HEAD~1`); `''` = alles bauen |
@@ -175,6 +177,7 @@ Branches, eigene Stage je Paket):
 | `pyMonorepo.install()` | Pfad | Skripte nach `.ci-lib/` schreiben; **zuerst** aufrufen |
 | `pyMonorepo.changedPackages(base)` | `List` | geaenderte Pakete; leere Basis = alle |
 | `pyMonorepo.changedPackages(base, packages)` | `List` | mit fester Paketliste |
+| `pyMonorepo.changedPackages(base, packages, rootPackage)` | `List` | `rootPackage: true` -> Liste ist `.` |
 | `pyMonorepo.buildSdist(pkg)` | Archivpfad | sdist bauen |
 | `pyMonorepo.meta(archive, 'name'\|'version')` | String | aus der PKG-INFO |
 | `pyMonorepo.publish(archive:, nexusUrl:, hostedRepo:, credentialsId:)` | -- | Upload |
@@ -293,42 +296,49 @@ stattdessen:
 
 Manche Repos sind selbst ein einziges Paket: die `pyproject.toml` liegt in der
 Repo-Wurzel, der Quellcode unter `src/`. Dort gibt es keinen Top-Level-
-Paketordner. Solche Repos werden als ein Paket namens `.` erkannt, und **jede**
-geaenderte Datei zaehlt als Aenderung an diesem Paket. Im Build-Log heisst die
-Stage dann `Wurzelpaket`.
+Paketordner, und die Ordnersuche findet nichts. Solche Repos sagen es
+ausdruecklich:
 
-Als Paket-Metadaten in der Wurzel gilt eine `setup.py` - ohne Inhaltspruefung,
-sie existiert praktisch nie zu einem anderen Zweck -, oder eine `setup.cfg`
-mit einem `[metadata]`- oder `[options]`-Abschnitt, oder eine `pyproject.toml`
-mit einem `[project]`- bzw. `[tool.poetry]`-Abschnitt. Bei `setup.cfg` und
-`pyproject.toml` genuegt die blosse Datei nicht: eine `setup.cfg`, die nur
-Linter-Konfiguration enthaelt (`[flake8]`, `[mypy]`), oder eine
-`pyproject.toml`, die nur Werkzeugkonfiguration enthaelt (`[tool.black]`,
-`[tool.ruff]`), steht auch in einem echten Monorepo in der Wurzel und darf es
-nicht in ein Einzelpaket verwandeln. `[project.optional-dependencies]` bzw.
-`[options.extras_require]` und `[metadata.foo]` zaehlen ebenfalls nicht -
-danach kommt kein `]`, sondern ein `.`. Fuer beide Dateiformate gilt dieselbe
-Regel: der Abschnittskopf muss verankert stehen (`^...$`), toleriert wird aber
-Leerraum um den Abschnittsnamen und ein Kommentar dahinter - `[ project ]`,
-`[project]  # Kommentar`, `[ metadata ]` und `[metadata]  # Kommentar` zaehlen
-alle.
+    pyMonorepo { nexusUrl = '...'; rootPackage = true }          // Vollpipeline
+    pyMonorepo.build(nexusUrl: '...', rootPackage: true)         // Composite-Step
+    pyMonorepo.changedPackages(base, '', true)                   // Einzel-Step
+    ROOT_PACKAGE=true bash resources/de/firma/ci/changed-packages.sh <base>   # lokal
 
-Hat ein Repo **beides** - Metadaten in der Wurzel und Paketordner darunter -,
-gewinnt die Wurzel: es gilt als ein Paket. Wer das nicht will, setzt
-`packages` ausdruecklich; eine feste Liste gewinnt immer.
+Dann ist die Paketliste genau `.`, und **jede** geaenderte Datei zaehlt als
+Aenderung an diesem Paket. Im Build-Log heisst die Stage `Wurzelpaket`.
+`packages = '.'` ist gleichbedeutend und ebenfalls erlaubt.
 
-Bei einem Einzelpaket-Repo meint `packages = '.'` das Wurzelpaket selbst und
-ist erlaubt: jede geaenderte Datei zaehlt dafuer, genau wie bei der
-Auto-Erkennung.
+**Warum ein Schalter und keine Erkennung?** Ob eine Wurzel-`pyproject.toml`
+ein Distributionspaket beschreibt oder nur Werkzeugkonfiguration
+(`[tool.black]`, `[flake8]`) eines Monorepos ist, laesst sich ohne echten
+TOML-Parser nicht zuverlaessig entscheiden - und beide Fehlrichtungen sind
+teuer: ein Monorepo, das faelschlich als ein Paket gilt, verliert alle seine
+Pakete; ein Einzelpaket, das nicht erkannt wird, baut gar nichts. Wer sein
+Repo kennt, weiss die Antwort in einer Zeile.
+
+Der Schalter kommt aus einer der drei Quellen, in dieser Reihenfolge: das
+Argument `rootPackage` von `build()`, sonst der Build-Parameter
+`ROOT_PACKAGE`, falls die einbettende Pipeline ihn hat, sonst `false`. Fuer
+das Skript selbst ist es die Umgebungsvariable `ROOT_PACKAGE`. Als wahr gelten
+`true`, `1`, `yes`, `on`, `ja` (Gross-/Kleinschreibung egal), als falsch
+`false`, `0`, `no`, `off`, `nein` und der leere Wert. Ein anderer Wert bricht
+mit Exit 2 ab, statt still als "aus" zu gelten - ein Tippfehler wie
+`ROOT_PACKAGE=ture` wuerde sonst dazu fuehren, dass das Repo nichts baut und
+der Build trotzdem gruen bleibt.
+
+`rootPackage: true` zusammen mit einer anderen `packages`-Liste als `.` bricht
+ebenfalls mit Exit 2 ab: das Repo ist entweder ein Paket oder eine Menge von
+Paketordnern, nicht beides.
 
 Wird gar kein Paket erkannt, meldet `changed-packages.sh` das auf stderr:
 
-    HINWEIS: keine Paketordner und keine Paket-Metadaten in der Repo-Wurzel
-             gefunden - es wird nichts gebaut.
+    HINWEIS: keine Paketordner gefunden - es wird nichts gebaut.
+             ... Ist dieses Repo selbst EIN Paket (Metadaten in der Wurzel,
+             Quellcode unter src/), dann rootPackage: true setzen ...
 
 Der Build bleibt dabei gruen - ein Repo ohne Pakete ist kein Fehler -, aber die
-Zeile steht im Log. Fehlt sie und wird trotzdem nichts gebaut, liegt es nicht
-an der Erkennung.
+Zeile steht im Log. Sie ist der erste Ort, an dem ein vergessenes
+`rootPackage: true` auffaellt.
 
 Gebaut wird die Schnittmenge aus "ist ein Paket" und "liegt im `git diff` seit
 dem letzten erfolgreichen Build". Drei Sonderfaelle bauen absichtlich alles:

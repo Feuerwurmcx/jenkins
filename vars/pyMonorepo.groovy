@@ -162,7 +162,9 @@ Map build(Map args) {
 
         parallel pkgs.collectEntries { pkg ->
             [ (pkg): {
-                stage(pkg) {
+                // '.' ist das Repo selbst (Paket-Metadaten in der Wurzel).
+                // Eine Stage namens '.' waere im Blue Ocean unlesbar.
+                stage(pkg == '.' ? 'Wurzelpaket' : pkg) {
                     String archive  = buildSdist(pkg)
                     String distName = meta(archive, 'name')
                     String version  = meta(archive, 'version')

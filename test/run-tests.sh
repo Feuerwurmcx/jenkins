@@ -389,6 +389,20 @@ assert_contains "Stub-Backend: Log meldet Ordner -> Paketname" \
 assert_eq "Stub-Backend: Staging-Verzeichnis aufgeraeumt" "" \
   "$(ls -A "${REPO}/dist" | grep '^\.build-' || true)"
 
+# Ein Repo, das selbst ein Paket ist: build-sdist.sh bekommt '.' statt eines
+# Ordnernamens. Die Logzeile "Ordner '.'" waere missverstaendlich.
+SREPO_B="$(fixture_single_repo)"
+STUB_BIN_S="$(make_python_stub)"
+OUT="$(cd "$SREPO_B" && PATH="${STUB_BIN_S}:${PATH}" STUB_NAME='einzelpaket' STUB_VERSION='1.0.0' \
+       bash "$SCRIPTS/build-sdist.sh" . 2>"${TMP}/single-build.err")"; RC=$?
+assert_rc "build-sdist.sh . -> rc 0" 0 "$RC"
+assert_contains "build-sdist.sh . -> Archivpfad" "$OUT" "dist/"
+assert_contains "build-sdist.sh . meldet 'Repo-Wurzel', nicht \"Ordner '.'\"" \
+  "$(cat "${TMP}/single-build.err")" "Repo-Wurzel ->"
+if grep -q "Ordner '\.'" "${TMP}/single-build.err"; then
+  nok "build-sdist.sh . vermeidet \"Ordner '.'\"" "alte Formulierung noch da"
+else ok "build-sdist.sh . vermeidet \"Ordner '.'\""; fi
+
 # I-1 durch den kompletten build-sdist.sh-Pfad: der Stub legt hier eine
 # PKG-INFO > 64 KB ins gebaute Archiv (STUB_BIG_PKGINFO=1), und build-sdist.sh
 # muss trotzdem durchlaufen - frueher brach 'tar xzOf ... | head -40' (Z. 63
@@ -785,7 +799,8 @@ $BAD_BARE"; fi
   assert_contains "build() kennt die erlaubten Schluessel" "$BUILD_MAP_BODY" \
     "['nexusUrl', 'hostedRepo', 'credentialsId', 'packages', 'buildAll', 'skipUpload', 'base', 'archive', 'cleanup']"
   assert_contains "build() lehnt unbekannte Schluessel ab" "$BUILD_MAP_BODY" 'unbekannte Argumente'
-  for NEEDLE in "stage(pkg)" \
+  assert_contains "build(): Stage-Label fuer das Wurzelpaket" "$BUILD_MAP_BODY" "Wurzelpaket"
+  for NEEDLE in "stage(pkg == '.' ? 'Wurzelpaket' : pkg)" \
                 "if (skipUpload) {" \
                 'echo "Basis   :' \
                 'echo "Pakete  :' \

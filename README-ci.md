@@ -291,6 +291,38 @@ stattdessen:
     packages = 'paket1 paket2'                                        // im Jenkinsfile
     PACKAGES="paket1 paket2" bash resources/de/firma/ci/changed-packages.sh <base>     # lokal
 
+Manche Repos sind selbst ein einziges Paket: die `pyproject.toml` liegt in der
+Repo-Wurzel, der Quellcode unter `src/`. Dort gibt es keinen Top-Level-
+Paketordner. Solche Repos werden als ein Paket namens `.` erkannt, und **jede**
+geaenderte Datei zaehlt als Aenderung an diesem Paket. Im Build-Log heisst die
+Stage dann `Wurzelpaket`.
+
+Als Paket-Metadaten in der Wurzel gilt eine `setup.py` - ohne Inhaltspruefung,
+sie existiert praktisch nie zu einem anderen Zweck -, oder eine `setup.cfg`
+mit einem `[metadata]`- oder `[options]`-Abschnitt, oder eine `pyproject.toml`
+mit einem `[project]`- bzw. `[tool.poetry]`-Abschnitt. Bei `setup.cfg` und
+`pyproject.toml` genuegt die blosse Datei nicht: eine `setup.cfg`, die nur
+Linter-Konfiguration enthaelt (`[flake8]`, `[mypy]`), oder eine
+`pyproject.toml`, die nur Werkzeugkonfiguration enthaelt (`[tool.black]`,
+`[tool.ruff]`), steht auch in einem echten Monorepo in der Wurzel und darf es
+nicht in ein Einzelpaket verwandeln. `[project.optional-dependencies]` allein
+zaehlt ebenfalls nicht - danach kommt kein `]`, sondern ein `.`. Das Muster ist
+verankert, toleriert aber Leerraum um den Abschnittsnamen und einen Kommentar
+dahinter: `[ project ]` und `[project]  # Kommentar` zaehlen beide.
+
+Hat ein Repo **beides** - Metadaten in der Wurzel und Paketordner darunter -,
+gewinnt die Wurzel: es gilt als ein Paket. Wer das nicht will, setzt
+`packages` ausdruecklich; eine feste Liste gewinnt immer.
+
+Wird gar kein Paket erkannt, meldet `changed-packages.sh` das auf stderr:
+
+    HINWEIS: keine Paketordner und keine Paket-Metadaten in der Repo-Wurzel
+             gefunden - es wird nichts gebaut.
+
+Der Build bleibt dabei gruen - ein Repo ohne Pakete ist kein Fehler -, aber die
+Zeile steht im Log. Fehlt sie und wird trotzdem nichts gebaut, liegt es nicht
+an der Erkennung.
+
 Gebaut wird die Schnittmenge aus "ist ein Paket" und "liegt im `git diff` seit
 dem letzten erfolgreichen Build". Drei Sonderfaelle bauen absichtlich alles:
 

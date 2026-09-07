@@ -86,7 +86,12 @@ DIST_VER="$(sed -n '/^Version: /{
 s/^Version: //p
 q
 }' <<<"$META")"
-echo "Ordner '${PKG}' -> ${DIST_NAME} ${DIST_VER}" >&2
+# Bei '.' ist das Repo selbst das Paket - "Ordner '.'" waere missverstaendlich.
+if [[ "$PKG" == "." ]]; then
+  echo "Repo-Wurzel -> ${DIST_NAME} ${DIST_VER}" >&2
+else
+  echo "Ordner '${PKG}' -> ${DIST_NAME} ${DIST_VER}" >&2
+fi
 
 mv -f "$ARCHIVE" "${ABS_OUT}/"
 echo "${OUT_DIR}/$(basename "$ARCHIVE")"

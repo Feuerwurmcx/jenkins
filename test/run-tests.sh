@@ -1704,6 +1704,38 @@ HINT_ERR_CFG="$(cd "$RCFGMETA" && $CP '' 2>&1 >/dev/null)"
 assert_contains "I-3/M-7: Ausloeser setup.cfg auf stderr" \
   "$HINT_ERR_CFG" "Paket-Metadaten in der Repo-Wurzel (setup.cfg)"
 
+# M-1: die Verankerung (^...$) muss [project]/[metadata] mitten in einer
+# Kommentar-/Textzeile verwerfen - fuer BEIDE Formate (Laborfall E).
+RMIDTEXT="$(make_root_repo midtext '[tool.black]
+# jedes Paket hat seinen eigenen [project]-Abschnitt
+line-length = 100')"
+assert_eq "M-1: [project] mitten im Kommentar -> weiter Monorepo" "alpha" \
+  "$(cd "$RMIDTEXT" && $CP '' 2>/dev/null)"
+
+RCFGMIDTEXT="$(make_root_setupcfg_repo cfgmidtext '[flake8]
+max-line-length = 100
+# das Wurzelpaket hat kein eigenes [metadata]')"
+assert_eq "M-1: [metadata] mitten in einer Textzeile -> weiter Monorepo" "alpha" \
+  "$(cd "$RCFGMIDTEXT" && $CP '' 2>/dev/null)"
+
+# M-2: [options] allein (ohne [metadata]) macht aus setup.cfg Paket-Metadaten.
+RCFGOPTIONS="$(make_root_setupcfg_repo cfgoptions '[options]
+packages = find:')"
+assert_eq "M-2: Wurzel-setup.cfg mit nur [options] -> ." "." \
+  "$(cd "$RCFGOPTIONS" && $CP '' 2>/dev/null)"
+
+# M-3: der Exit-Code des Einzelpaket-Zweigs (echte Basis) ist bisher
+# ungeprueft - alle Assertions verglichen nur stdout.
+OUT_M3="$(cd "$SREPO" && $CP HEAD~1 2>/dev/null)"; RC_M3=$?
+assert_rc "M-3: Einzelpaket, echte Basis -> rc 0" 0 "$RC_M3"
+
+# M-4: TOML ist case-sensitiv - [PROJECT] ist eine andere Tabelle als
+# [project] und darf NICHT zaehlen.
+RCASE="$(make_root_repo caseinsens '[PROJECT]
+name = "x"')"
+assert_eq "M-4: [PROJECT] (Grossschreibung) -> weiter Monorepo" "alpha" \
+  "$(cd "$RCASE" && $CP '' 2>/dev/null)"
+
 # Repo ganz ohne Paket: leere Ausgabe UND ein Hinweis - der stille Leerlauf
 # war der eigentliche Fehler.
 RNONE="${TMP}/rootrepo-none"; rm -rf "$RNONE"; mkdir -p "$RNONE/doku"

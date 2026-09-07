@@ -392,14 +392,6 @@ private boolean paramOr(String name, boolean dflt) {
     return toBool(p[name], dflt)
 }
 
-// 'false' as boolean waere true (Groovy-Truthiness: ein nicht-leerer String
-// ist wahr) - betrifft jeden Boolean-Parameter, der als String hereinkommt
-// (z.B. string(name: 'SKIP_UPLOAD', defaultValue: 'false') in der
-// einbettenden Pipeline). Nur v == null faellt auf den Default zurueck;
-// Booleans werden direkt durchgereicht, alles andere (Strings, Zahlen,
-// GStrings, ...) laeuft ueber toString().trim().equalsIgnoreCase('true') -
-// und ist damit fast immer false, sofern es nicht literal 'true' ergibt
-// (I-1/I-2).
 // Rohwert als String, ohne jede Umdeutung - null und fehlend werden zu ''
 // (= aus). Gegenstueck zu toBool() fuer Werte, die woanders geprueft werden.
 private String asRaw(Object v) {
@@ -414,6 +406,16 @@ private String paramRaw(String name) {
     if (!(p instanceof Map) || !p.containsKey(name)) { return '' }
     return asRaw(p[name])
 }
+
+// 'false' as boolean waere true (Groovy-Truthiness: ein nicht-leerer String
+// ist wahr) - betrifft jeden Boolean-Parameter, der als String hereinkommt
+// (z.B. string(name: 'SKIP_UPLOAD', defaultValue: 'false') in der
+// einbettenden Pipeline). Nur v == null faellt auf den Default zurueck;
+// Booleans werden direkt durchgereicht, alles andere (Strings, Zahlen,
+// GStrings, ...) laeuft ueber toString().trim().equalsIgnoreCase('true') -
+// und ist damit fast immer false, sofern es nicht literal 'true' ergibt
+// (I-1/I-2). Fuer ROOT_PACKAGE ist das die falsche Behandlung - siehe
+// asRaw() oben und die Begruendung bei rootPackage in build().
 
 private boolean toBool(Object v, boolean dflt) {
     if (v == null) { return dflt }

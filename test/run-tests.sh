@@ -790,7 +790,8 @@ $BAD_BARE"; fi
                 'echo "Pakete  :' \
                 "parallel pkgs.collectEntries" \
                 "versions.sort()" \
-                "currentBuild.description" \
+                "currentBuild.description = 'keine Paketänderungen'" \
+                "currentBuild.description = \"\${pkgs.size()} Paket(e)" \
                 "install()" \
                 "changedPackages(base, args.packages" \
                 "buildSdist(pkg)" \
@@ -1583,8 +1584,12 @@ SREPO="$(fixture_single_repo)"
 # Wurzel-pyproject.toml mit [project] macht fuer sich genommen kein Paket.
 # Diese beiden Zeilen zusammen sind der Beweis, dass entschieden und nicht
 # geraten wird; einzeln beweist keine von beiden etwas.
-assert_eq "ohne ROOT_PACKAGE: Wurzel-[project] zaehlt NICHT" "" \
-  "$(cd "$SREPO" && $CP '' 2>/dev/null)"
+# Der rc gehoert ueberall dazu, wo "leer" das erwartete Ergebnis ist: ein
+# Abbruch liefert AUCH leeres stdout. Ohne assert_rc waere jede Mutation, die
+# das Skript abbrechen laesst, hier gruen - in Jenkins dagegen ein roter Build.
+OFF_SREPO="$(cd "$SREPO" && $CP '' 2>/dev/null)"; RC_OFF_SREPO=$?
+assert_eq "ohne ROOT_PACKAGE: Wurzel-[project] zaehlt NICHT" "" "$OFF_SREPO"
+assert_rc "ohne ROOT_PACKAGE: rc 0, kein Abbruch" 0 "$RC_OFF_SREPO"
 assert_eq "ROOT_PACKAGE=true -> ." "." \
   "$(cd "$SREPO" && ROOT_PACKAGE=true $CP '' 2>/dev/null)"
 
@@ -1594,8 +1599,9 @@ assert_eq "ROOT_PACKAGE=true -> ." "." \
 OUT_RP="$(cd "$SREPO" && ROOT_PACKAGE=true $CP HEAD~1 2>/dev/null)"; RC_RP=$?
 assert_eq "ROOT_PACKAGE, Datei unter src/ geaendert -> ." "." "$OUT_RP"
 assert_rc "ROOT_PACKAGE, echte Basis -> rc 0" 0 "$RC_RP"
-assert_eq "ohne ROOT_PACKAGE, echte Basis -> leer" "" \
-  "$(cd "$SREPO" && $CP HEAD~1 2>/dev/null)"
+OFF_BASE="$(cd "$SREPO" && $CP HEAD~1 2>/dev/null)"; RC_OFF_BASE=$?
+assert_eq "ohne ROOT_PACKAGE, echte Basis -> leer" "" "$OFF_BASE"
+assert_rc "ohne ROOT_PACKAGE, echte Basis -> rc 0" 0 "$RC_OFF_BASE"
 
 # PACKAGES='.' sagt dasselbe wie ROOT_PACKAGE und muss weiter funktionieren:
 # '.' lief frueher in der Schnittmenge gegen TOUCHED (erste Pfadkomponente)
@@ -1604,8 +1610,9 @@ assert_eq "PACKAGES='.' echte Basis, Datei geaendert -> ." "." \
   "$(cd "$SREPO" && PACKAGES='.' $CP HEAD~1 2>/dev/null)"
 
 ( cd "$SREPO" && git commit -q --allow-empty -m leer )
-assert_eq "ROOT_PACKAGE, nichts geaendert -> leer" "" \
-  "$(cd "$SREPO" && ROOT_PACKAGE=true $CP HEAD~1 2>/dev/null)"
+NOCHG="$(cd "$SREPO" && ROOT_PACKAGE=true $CP HEAD~1 2>/dev/null)"; RC_NOCHG=$?
+assert_eq "ROOT_PACKAGE, nichts geaendert -> leer" "" "$NOCHG"
+assert_rc "ROOT_PACKAGE, nichts geaendert -> rc 0" 0 "$RC_NOCHG"
 
 # Schreibweisen. Ein Boolean-Parameter kommt aus Jenkins als String herein,
 # und Menschen schreiben ihn unterschiedlich.
@@ -1716,8 +1723,9 @@ RNONE="${TMP}/rootrepo-none"; rm -rf "$RNONE"; mkdir -p "$RNONE/doku"
 echo "nur doku" > "$RNONE/doku/index.md"
 ( cd "$RNONE" && git init -q -b main && git config user.email t@e.x && git config user.name T \
   && git add -A && git commit -q -m init ) >/dev/null
-assert_eq "Repo ohne Paket -> leere Ausgabe" "" \
-  "$(cd "$RNONE" && $CP '' 2>/dev/null)"
+NOPKG="$(cd "$RNONE" && $CP '' 2>/dev/null)"; RC_NOPKG=$?
+assert_eq "Repo ohne Paket -> leere Ausgabe" "" "$NOPKG"
+assert_rc "Repo ohne Paket -> rc 0 (kein Fehler)" 0 "$RC_NOPKG"
 assert_contains "Repo ohne Paket -> Hinweis auf stderr" \
   "$(cd "$RNONE" && $CP '' 2>&1 >/dev/null)" "keine Paketordner"
 

@@ -14,6 +14,10 @@
 #
 # Zugangsdaten gehen über 'curl --config -' von stdin, nicht über argv: sonst
 # stünden sie in der Prozessliste jedes Nutzers auf dem Agent.
+#
+# Vor dem Upload wird der Simple-Index (PEP 503) des Ziel-Repos gefragt, ob
+# die Datei dort schon liegt. Ein Duplikat wird dann übersprungen statt
+# abgelehnt: Exit 0 mit einer SKIP-Meldung, kein Fehler.
 set -euo pipefail
 set +x
 
@@ -73,6 +77,10 @@ reject_whitespace NEXUS_PYPI_HOSTED "$NEXUS_PYPI_HOSTED"
 BASE="${NEXUS_URL%/}"
 UPLOAD_URL="${BASE}/service/rest/v1/components?repository=${NEXUS_PYPI_HOSTED}"
 
+# Verzeichnis dieses Skripts - dort liegt auch sdist-meta.sh. Zur Laufzeit ist
+# das .ci-lib auf dem Agent, lokal resources/de/firma/ci.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # --- Zugangsdaten ------------------------------------------------------------
 # Im curl-Config-Format sind " und \ Sonderzeichen. Ohne Escaping bricht ein
 # Passwort mit Anführungszeichen den Aufruf – beim Repo-Check still (er
@@ -120,6 +128,63 @@ for r in json.load(sys.stdin):
 }
 [[ "${SKIP_REPO_CHECK:-0}" == "1" ]] || check_repo_type
 
+# --- Liegt die Datei schon im Repo? -----------------------------------------
+# PEP 503: alles klein, und -, _ und . in beliebiger Wiederholung zu einem -.
+# 'Mein.Tolles_Paket' wird damit zu 'mein-tolles-paket'.
+normalize_name() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[-_.]+/-/g'
+}
+
+# Fragt den Simple-Index (PEP 503) - dieselbe API, die auch pip liest. Gibt 0
+# zurueck, wenn der Dateiname dort exakt gelistet ist.
+#
+# Das ist eine Abkuerzung, kein Gate: laesst sich der Index nicht abfragen
+# (keine Rechte, unerwarteter Status, curl scheitert), wird nur gewarnt und
+# normal hochgeladen. Ein Duplikat faengt dann der 400-Pfad ab, der ebenfalls
+# ueberspringt. Eine nicht durchfuehrbare Pruefung darf den Build nicht rot
+# machen - dieselbe Logik wie beim Repo-Typ-Check.
+already_published() {
+  local name normalized url http body body_file rc member
+  name="$(bash "${SCRIPT_DIR}/sdist-meta.sh" "$ARCHIVE" name)" || {
+    echo "HINWEIS: Paketname nicht lesbar - Vorabpruefung uebersprungen" >&2
+    return 1
+  }
+  normalized="$(normalize_name "$name")"
+  url="${BASE}/repository/${NEXUS_PYPI_HOSTED}/simple/${normalized}/"
+
+  body_file="$(mktemp)"
+  set +e
+  http="$(cfg_credentials \
+          | curl --config - --silent --show-error \
+                 --output "$body_file" --write-out '%{http_code}' \
+                 "$url" 2>/dev/null)"
+  rc=$?
+  set -e
+  body="$(cat "$body_file")"
+  rm -f "$body_file"
+
+  if [[ $rc -ne 0 ]]; then
+    echo "HINWEIS: Simple-Index nicht abfragbar (curl-Exit ${rc}) - Vorabpruefung uebersprungen" >&2
+    return 1
+  fi
+  case "$http" in
+    200) : ;;
+    404) return 1 ;;
+    *)   echo "HINWEIS: Simple-Index lieferte HTTP ${http} - Vorabpruefung uebersprungen" >&2
+         return 1 ;;
+  esac
+
+  # Link-Texte aus dem Index ziehen und EXAKT vergleichen. Ein Substring-Test
+  # wuerde '<datei>' faelschlich in einem gelisteten '<datei>.asc' finden.
+  member="$(basename "$ARCHIVE")"
+  tr '<' '\n' <<<"$body" | sed -n 's/^[aA] [^>]*>//p' | grep -qxF "$member"
+}
+
+if already_published; then
+  echo "SKIP: $(basename "$ARCHIVE") liegt bereits in ${NEXUS_PYPI_HOSTED}"
+  exit 0
+fi
+
 # --- Upload -----------------------------------------------------------------
 echo "Upload -> ${UPLOAD_URL}  ($(basename "$ARCHIVE"))"
 
@@ -158,9 +223,12 @@ case "$HTTP" in
   400)
     # Ein PyPI-hosted-Repo lehnt eine bereits vorhandene Version ab – das ist
     # fast immer ein vergessener Version-Bump, kein Infrastrukturfehler.
+    # Die Vorabpruefung hat das Duplikat nicht gesehen (Index nicht abfragbar,
+    # oder ein zweiter Build war schneller). Ergebnis ist dasselbe: die Datei
+    # liegt im Repo, es gibt nichts zu tun.
     if grep -qiE 'already exists|does not allow updating' <<<"$BODY"; then
-      echo "FEHLER: Version liegt bereits im Repo. Version im Paket erhoehen." >&2
-      exit 2
+      echo "SKIP: $(basename "$ARCHIVE") liegt bereits in ${NEXUS_PYPI_HOSTED} (Nexus meldete HTTP 400)"
+      exit 0
     fi
     echo "FEHLER: Upload abgelehnt (HTTP 400)" >&2
     printf '%s\n' "$BODY" >&2

@@ -268,6 +268,18 @@ proxy und bei einem hosted-Repo, das kein PyPI-Format hat). Ist die API nicht
 erreichbar oder fehlen die Rechte, wird nur gewarnt. Abschalten mit
 `SKIP_REPO_CHECK=1`.
 
+**Diese beiden Abkuerzungen sind gekoppelt:** die Simple-Index-Vorabpruefung
+weiter oben laeuft nur, wenn dieser Repo-Typ-Check zuvor bestaetigt hat, dass
+`NEXUS_PYPI_HOSTED` wirklich ein hosted-PyPI-Repo ist. Grund: zeigt
+`NEXUS_PYPI_HOSTED` faelschlich auf ein Group-Repo, aggregiert dessen
+Simple-Index die Member - auch einen PyPI-Proxy. Ein Treffer dort waere kein
+verlaesslicher Beleg dafuer, dass die Datei im eigentlichen Ziel-Repo liegt,
+und haette sonst zu einem stillen FALSCHEN Skip fuehren koennen: Build gruen,
+nichts hochgeladen. Ist der Repo-Typ nicht bestaetigt - REST-API nicht
+erreichbar, Repo in der API nicht gefunden, oder `SKIP_REPO_CHECK=1` - wird
+deshalb auch die Simple-Index-Vorabpruefung uebersprungen; ein echtes
+Duplikat faengt dann weiterhin der 400-Pfad ab, nur eine HTTP-Runde spaeter.
+
 ## Welche Pakete werden gebaut
 
 `changed-packages.sh` erkennt Pakete als Top-Level-Ordner mit `pyproject.toml`,

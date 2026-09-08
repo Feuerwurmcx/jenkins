@@ -141,6 +141,10 @@ case "${1:-}" in
       cat >/dev/null   # das Python-Skript kommt ueber stdin - verwerfen
       [[ -n "${2:-}" && $# -eq 2 ]] \
         || { echo "python3-stub: unerwartete Argumente (PEP-517-Zweig): $*" >&2; exit 2; }
+      # STUB_PEP517_RC taeuscht einen Ausgang des PEP-517-Zweigs vor - 3 heisst
+      # "build-system.requires nicht erfuellt", worauf build-sdist.sh auf eine
+      # vorhandene setup.py ausweichen soll.
+      [[ "${STUB_PEP517_RC:-0}" == 0 ]] || exit "${STUB_PEP517_RC}"
       out="$2" ;;
   setup.py) check_cwd
       [[ "${2:-}" == --quiet && "${3:-}" == sdist && "${4:-}" == --dist-dir && -n "${5:-}" ]] \
@@ -487,6 +491,52 @@ assert_contains "ohne python-build: nur setup.cfg -> verstaendliche Meldung" \
      bash "$SCRIPTS/build-sdist.sh" delta 2>&1 >/dev/null)" \
   "weder pyproject.toml noch"
 
+# Ausweichen auf setup.py, wenn build-system.requires nicht erfuellt ist.
+# Genau der Fall des Zielagenten: setuptools zu alt fuer die
+# [project]-Metadaten. Ohne diesen Weg bleibt nur ein Abbruch, obwohl eine
+# setup.py danebenliegt, die das Paket beschreibt.
+AUSW="${TMP}/ausweichen"; rm -rf "$AUSW"; mkdir -p "$AUSW/pkg"
+printf '[build-system]\nrequires = ["setuptools>=999"]\nbuild-backend = "setuptools.build_meta"\n' \
+  > "$AUSW/pkg/pyproject.toml"
+printf 'from setuptools import setup\nsetup()\n' > "$AUSW/pkg/setup.py"
+OUT_AW="$(cd "$AUSW" && PATH="${STUB_BIN}:${PATH}" STUB_NO_BUILD=1 STUB_PEP517_RC=3 \
+  STUB_NAME='ausweich' STUB_VERSION='2.0' bash "$SCRIPTS/build-sdist.sh" pkg 2>/dev/null)"; RC_AW=$?
+assert_rc "unerfuellte requires + setup.py -> gebaut (rc 0)" 0 "$RC_AW"
+assert_eq "unerfuellte requires + setup.py -> Archivpfad" "dist/ausweich-2.0.tar.gz" "$OUT_AW"
+assert_contains "unerfuellte requires + setup.py -> Ausweichen steht im Log" \
+  "$(cd "$AUSW" && PATH="${STUB_BIN}:${PATH}" STUB_NO_BUILD=1 STUB_PEP517_RC=3 \
+     STUB_NAME='ausweich' STUB_VERSION='2.0' bash "$SCRIPTS/build-sdist.sh" pkg 2>&1 >/dev/null)" \
+  "weiche auf 'setup.py sdist' aus"
+
+# Ohne setup.py bleibt es beim Fehler - nicht etwa still bei rc 0.
+OHNE="${TMP}/ausweichen-ohne"; rm -rf "$OHNE"; mkdir -p "$OHNE/pkg"
+cp "$AUSW/pkg/pyproject.toml" "$OHNE/pkg/pyproject.toml"
+OUT_OH="$(cd "$OHNE" && PATH="${STUB_BIN}:${PATH}" STUB_NO_BUILD=1 STUB_PEP517_RC=3 \
+  bash "$SCRIPTS/build-sdist.sh" pkg 2>/dev/null)"; RC_OH=$?
+assert_rc "unerfuellte requires ohne setup.py -> rc 1" 1 "$RC_OH"
+assert_eq "unerfuellte requires ohne setup.py -> keine Ausgabe" "" "$OUT_OH"
+
+# Jeder ANDERE Fehler des PEP-517-Zweigs bleibt ein Fehler, auch mit setup.py:
+# sonst wuerde ein kaputtes Backend still durch die Hintertuer gebaut.
+OUT_AND="$(cd "$AUSW" && PATH="${STUB_BIN}:${PATH}" STUB_NO_BUILD=1 STUB_PEP517_RC=1 \
+  STUB_NAME='ausweich' STUB_VERSION='2.0' bash "$SCRIPTS/build-sdist.sh" pkg 2>/dev/null)"; RC_AND=$?
+assert_rc "anderer PEP-517-Fehler + setup.py -> trotzdem rc 1" 1 "$RC_AND"
+assert_eq "anderer PEP-517-Fehler -> keine Ausgabe" "" "$OUT_AND"
+
+# Riegel gegen UNKNOWN-0.0.0: das ist, was ein setuptools < 61 baut, wenn es
+# die [project]-Metadaten nicht lesen kann. Formal eine gueltige sdist - sie
+# darf trotzdem nicht ins Nexus.
+for PAAR in 'UNKNOWN 1.2.3' 'echtername 0.0.0'; do
+  set -- $PAAR
+  OUT_UNK="$(cd "$REPO" && PATH="${STUB_BIN}:${PATH}" STUB_NAME="$1" STUB_VERSION="$2" \
+    bash "$SCRIPTS/build-sdist.sh" alpha 2>/dev/null)"; RC_UNK=$?
+  assert_rc "Riegel: sdist '$1 $2' wird abgelehnt (rc 1)" 1 "$RC_UNK"
+  assert_eq "Riegel: '$1 $2' -> keine Ausgabe auf stdout" "" "$OUT_UNK"
+done
+assert_contains "Riegel: Meldung nennt setuptools 61 als Ursache" \
+  "$(cd "$REPO" && PATH="${STUB_BIN}:${PATH}" STUB_NAME='UNKNOWN' STUB_VERSION='1.0' \
+     bash "$SCRIPTS/build-sdist.sh" alpha 2>&1 >/dev/null)" "aelter als Version 61"
+
 # --- Der PEP-517-Zweig mit ECHTEM python3 -------------------------------
 # Der Stub oben verwirft das Python-Skript (cat >/dev/null) und prueft nur den
 # Bash-Teil. Damit blieb der ganze Python-Kern ungetestet, sobald kein echtes
@@ -667,16 +717,104 @@ build-backend = "gibtsnicht.backend"')"
     "$(cd "$D_TOML" && PATH="${NB_BIN}:${PATH}" bash "$SCRIPTS/build-sdist.sh" pkg 2>&1 >/dev/null)" \
     "pyproject.toml ist nicht lesbar"
 
-  # Ohne TOML-Parser wird NICHT geraten: ein angenommenes setuptools baut ein
-  # Poetry-Projekt unter falschem Namen und mit Version 0.0.0 durch, und
-  # publish-pypi.sh laedt das hoch.
+  # Ohne tomllib/tomli (Python < 3.11) liest ein Minimalparser die Tabelle
+  # [build-system]. Geraten wird auch dann nicht: was er nicht sicher
+  # versteht, fuehrt zum Abbruch. Diese Faelle brauchen kein Backend - sie
+  # pruefen, WAS gelesen wurde, an der Fehlermeldung des Backend-Imports.
   NOTOML="${TMP}/notomllib"; rm -rf "$NOTOML"; mkdir -p "$NOTOML"
   printf 'raise ModuleNotFoundError("No module named %s")\n' "'tomllib'" > "$NOTOML/tomllib.py"
   printf 'raise ModuleNotFoundError("No module named %s")\n' "'tomli'" > "$NOTOML/tomli.py"
-  ERR_NT="$(cd "$D_BK" && PATH="${NB_BIN}:${PATH}" PYTHONPATH="$NOTOML" \
-            bash "$SCRIPTS/build-sdist.sh" pkg 2>&1 >/dev/null)"
-  assert_contains "PEP 517: ohne TOML-Parser wird nicht geraten" "$ERR_NT" \
-    "geraten wird hier nicht"
+  nt() { cd "$1" && PATH="${NB_BIN}:${PATH}" PYTHONPATH="$NOTOML" \
+           bash "$SCRIPTS/build-sdist.sh" pkg 2>&1 >/dev/null; }
+
+  ERR_NT="$(nt "$D_BK")"
+  assert_contains "Minimalparser: meldet sich im Log" "$ERR_NT" "Minimalparser"
+  assert_contains "Minimalparser: liest build-backend" "$ERR_NT" "gibtsnicht.backend"
+
+  # Die Schreibweisen, die in echten Dateien vorkommen: mehrzeilige Liste,
+  # Kommentar hinter dem Wert, und ein fremder Schluessel in [build-system] -
+  # dpl-core und dpl-components haben dort ein 'version' stehen, das
+  # bump-my-version hineingeschrieben hat. Ein echter TOML-Parser ignoriert
+  # so etwas, der Minimalparser muss das auch tun.
+  D_ECHT="$(mk517 echtformat '[build-system]
+version = "0.1.0"
+requires = [
+    "setuptools>=70",
+    "wheel",
+]
+build-backend = "gibtsnicht.backend"   # mit Kommentar dahinter
+backend-path = ["_eigenes"]
+
+[project]
+name = "egal"')"
+  ERR_ECHT="$(nt "$D_ECHT")"
+  assert_contains "Minimalparser: mehrzeilige requires-Liste" "$ERR_ECHT" \
+    "setuptools>=70"
+  assert_contains "Minimalparser: zweiter Eintrag der Liste" "$ERR_ECHT" "wheel"
+  # Zweiter Lauf ohne requires-Pruefung: erst dann kommt der Backend-Import
+  # dran, und seine Fehlermeldung zeigt, WAS der Parser als Backend gelesen
+  # hat - trotz des fremden 'version'-Schluessels davor.
+  ERR_ECHT2="$(cd "$D_ECHT" && PATH="${NB_BIN}:${PATH}" PYTHONPATH="$NOTOML" \
+    SKIP_REQUIRES_CHECK=1 bash "$SCRIPTS/build-sdist.sh" pkg 2>&1 >/dev/null)"
+  assert_contains "Minimalparser: fremder Schluessel stoert nicht" "$ERR_ECHT2" \
+    "gibtsnicht.backend"
+  # Nur [build-system] wird gelesen - der Rest der Datei geht ihn nichts an.
+  if grep -q 'name = "egal"' <<<"$ERR_ECHT"; then
+    nok "Minimalparser: liest nur [build-system]" "Inhalt aus [project] aufgetaucht"
+  else ok "Minimalparser: liest nur [build-system]"; fi
+
+  # Ein FREMDER Schluessel mit mehrzeiliger Liste: der Parser muss sie
+  # ueberspringen, sonst haelt er die Fortsetzungszeilen fuer eigene Eintraege.
+  D_FREMD="$(mk517 fremdliste '[build-system]
+klassifizierung = [
+    "eins",
+    "zwei",
+]
+requires = ["ganz-sicher-nicht-installiert-xyz"]
+build-backend = "gibtsnicht.backend"')"
+  ERR_FREMD="$(nt "$D_FREMD")"
+  # Ein Paket, das es nirgends gibt: die Erwartung haengt so nicht daran, ob
+  # auf dem pruefenden Rechner zufaellig setuptools installiert ist.
+  assert_contains "Minimalparser: fremde mehrzeilige Liste wird uebersprungen" \
+    "$ERR_FREMD" "ganz-sicher-nicht-installiert-xyz (nicht installiert)"
+  if grep -qE '"?(eins|zwei)"? \(nicht installiert\)' <<<"$ERR_FREMD"; then
+    nok "Minimalparser: fremde Listeneintraege landen nicht in requires" \
+      "$(grep -o -E '(eins|zwei)' <<<"$ERR_FREMD" | head -1) tauchte in requires auf"
+  else ok "Minimalparser: fremde Listeneintraege landen nicht in requires"; fi
+
+  # Der Exit-Code 3 des PEP-517-Zweigs ist das Signal fuer "weiche auf setup.py
+  # aus". Oben wird die Bash-Seite davon mit einem vorgetaeuschten rc geprueft;
+  # hier laeuft der ECHTE Python-Teil und muss diesen rc auch liefern. Die
+  # setup.py kommt ohne setuptools aus, damit der Fall ohne Abhaengigkeit
+  # nachvollziehbar ist.
+  D_RC3="$(mk517 rc3 '[build-system]
+requires = ["ganz-sicher-nicht-installiert-xyz"]
+build-backend = "setuptools.build_meta"')"
+  cat > "$D_RC3/pkg/setup.py" <<'SETUPPY'
+import io, os, sys, tarfile, time
+# Kein setuptools: baut von Hand ein Minimalarchiv, damit der Ausweichpfad
+# ohne jede Abhaengigkeit pruefbar ist.
+ziel = sys.argv[sys.argv.index("--dist-dir") + 1]
+info = b"Metadata-Version: 2.1\nName: ausweichpaket\nVersion: 4.2\n"
+with tarfile.open(os.path.join(ziel, "ausweichpaket-4.2.tar.gz"), "w:gz") as tar:
+    ti = tarfile.TarInfo("ausweichpaket-4.2/PKG-INFO")
+    ti.size = len(info); ti.mtime = int(time.time())
+    tar.addfile(ti, io.BytesIO(info))
+SETUPPY
+  OUT_RC3="$(cd "$D_RC3" && PATH="${NB_BIN}:${PATH}" bash "$SCRIPTS/build-sdist.sh" pkg 2>/dev/null)"; RC_RC3=$?
+  assert_rc "echter rc 3: unerfuellte requires weichen auf setup.py aus" 0 "$RC_RC3"
+  assert_eq "echter rc 3: Archivpfad kommt aus der setup.py-sdist" \
+    "dist/ausweichpaket-4.2.tar.gz" "$OUT_RC3"
+
+  # Was er nicht versteht, bricht ab - statt ein Backend zu raten.
+  D_KRUM="$(mk517 krumm '[build-system]
+requires = [
+    "setuptools>=70",
+build-backend = "gibtsnicht.backend"')"
+  RC_KRUM=0
+  (cd "$D_KRUM" && PATH="${NB_BIN}:${PATH}" PYTHONPATH="$NOTOML" \
+     bash "$SCRIPTS/build-sdist.sh" pkg >/dev/null 2>&1) || RC_KRUM=$?
+  assert_rc "Minimalparser: unverstandene Datei -> rc 1" 1 "$RC_KRUM"
 fi
 
 # Zusaetzlich mit echtem Backend, wenn eines da ist. Der Stub prueft nur den

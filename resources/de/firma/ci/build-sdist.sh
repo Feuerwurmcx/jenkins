@@ -50,6 +50,7 @@ if python3 -c 'import build' 2>/dev/null; then
   ( cd "$PKG" && python3 -m build --sdist --outdir "$STAGE" ) >&2
 elif [[ -f "$PKG/pyproject.toml" ]]; then
   echo "HINWEIS: python-build nicht installiert - rufe das Backend aus pyproject.toml direkt auf (PEP 517)" >&2
+  PEP517_RC=0
   (
     cd "$PKG" && python3 - "$STAGE" <<'PY'
 import importlib
@@ -77,27 +78,121 @@ def abbruch(text):
 # pyproject.toml. Ein angenommenes setuptools baut ein Poetry- oder
 # Hatch-Projekt zwar oft ohne Fehler durch - aber unter falschem Namen und
 # mit Version 0.0.0, und publish-pypi.sh laedt das anschliessend hoch.
+def minimal_build_system(text):
+    """Liest NUR die Tabelle [build-system] aus pyproject.toml.
+
+    Notbehelf fuer Agents ohne tomllib (Python < 3.11) und ohne tomli. Bewusst
+    winzig und misstrauisch: erkannt werden ausschliesslich die drei Schluessel
+    dieser Tabelle in ihren ueblichen Schreibweisen. Alles, was der Parser
+    nicht sicher versteht, fuehrt zum Abbruch - lieber kein Ergebnis als ein
+    falsch geratenes Backend, das ein fremdes Projekt unter falschem Namen
+    baut. Der Rest der Datei wird nicht angefasst; die Paketmetadaten liest
+    ohnehin das Backend selbst.
+    """
+    ergebnis = {}
+    in_tabelle = False
+    puffer = None      # Schluessel, dessen Liste ueber mehrere Zeilen geht
+    for rohzeile in text.splitlines():
+        zeile = rohzeile.strip()
+        if puffer is None:
+            if zeile.startswith("#") or not zeile:
+                continue
+            if zeile.startswith("["):
+                # Tabellenkopf. Nur die exakte [build-system] zaehlt.
+                in_tabelle = zeile.split("#")[0].strip() == "[build-system]"
+                continue
+            if not in_tabelle:
+                continue
+            if "=" not in zeile:
+                abbruch("FEHLER: Zeile in [build-system] nicht verstanden: %r" % rohzeile)
+            schluessel, _, wert = zeile.partition("=")
+            schluessel = schluessel.strip().strip('"').strip("'")
+            wert = wert.strip()
+            if schluessel not in ("build-backend", "requires", "backend-path"):
+                # Unbekannte Schluessel werden ignoriert, nicht bemaengelt -
+                # genau wie ein echter TOML-Parser es tut. In freier Wildbahn
+                # steht dort durchaus Fremdes: dpl-core und dpl-components
+                # haben ein 'version' in [build-system] stehen, das
+                # bump-my-version dort hineingeschrieben hat.
+                if wert.startswith("[") and "]" not in wert:
+                    puffer = "\0ignorieren"   # mehrzeilige Liste ueberspringen
+                continue
+        else:
+            schluessel, wert = puffer, zeile
+            if schluessel == "\0ignorieren":
+                if "]" in wert:
+                    puffer = None
+                continue
+
+        if wert.startswith("["):
+            # Liste - ggf. ueber mehrere Zeilen.
+            if "]" not in wert:
+                puffer = schluessel
+                ergebnis.setdefault(schluessel, [])
+                ergebnis[schluessel].extend(_eintraege(wert[1:], rohzeile))
+                continue
+            puffer = None
+            inhalt = wert[1:wert.index("]")]
+            ergebnis.setdefault(schluessel, [])
+            ergebnis[schluessel].extend(_eintraege(inhalt, rohzeile))
+        elif puffer is not None:
+            ergebnis.setdefault(schluessel, [])
+            if "]" in wert:
+                puffer = None
+                wert = wert[:wert.index("]")]
+            ergebnis[schluessel].extend(_eintraege(wert, rohzeile))
+        else:
+            ergebnis[schluessel] = _zeichenkette(wert, rohzeile)
+    if puffer is not None and puffer != "\0ignorieren":
+        abbruch("FEHLER: nicht geschlossene Liste in [build-system] (%s)" % puffer)
+    return ergebnis
+
+
+def _zeichenkette(wert, rohzeile):
+    wert = wert.split("#")[0].strip() if not wert.startswith(("'", '"')) else wert
+    if len(wert) >= 2 and wert[0] == wert[-1] and wert[0] in "\"'":
+        return wert[1:-1]
+    # Ein Wert mit Kommentar dahinter: "x"  # Kommentar
+    for anfuehrung in ('"', "'"):
+        if wert.startswith(anfuehrung) and wert.count(anfuehrung) >= 2:
+            ende = wert.index(anfuehrung, 1)
+            return wert[1:ende]
+    abbruch("FEHLER: Wert in [build-system] nicht verstanden: %r" % rohzeile)
+
+
+def _eintraege(inhalt, rohzeile):
+    gefunden = []
+    for stueck in inhalt.split(","):
+        stueck = stueck.strip()
+        if not stueck or stueck.startswith("#"):
+            continue
+        gefunden.append(_zeichenkette(stueck, rohzeile))
+    return gefunden
+
+
+minimalparser = False
 try:
     import tomllib
 except ModuleNotFoundError:
     try:
         import tomli as tomllib
     except ModuleNotFoundError:
-        abbruch(
-            "FEHLER: pyproject.toml ist nicht lesbar - weder tomllib (Python\n"
-            "        >= 3.11) noch tomli sind vorhanden. Welches Build-Backend\n"
-            "        gilt, steht nur in dieser Datei; geraten wird hier nicht.\n"
-            "        Abhilfe: python-build installieren, oder tomli, oder\n"
-            "        Python >= 3.11 verwenden."
-        )
+        tomllib = None
+        minimalparser = True
 
 try:
-    with open("pyproject.toml", "rb") as fh:
-        pyproject = tomllib.load(fh)
+    if minimalparser:
+        sys.stderr.write(
+            "HINWEIS: weder tomllib (Python >= 3.11) noch tomli - [build-system] "
+            "wird mit dem Minimalparser gelesen\n"
+        )
+        with open("pyproject.toml", "r") as fh:
+            build_system = minimal_build_system(fh.read())
+    else:
+        with open("pyproject.toml", "rb") as fh:
+            build_system = tomllib.load(fh).get("build-system", {})
 except (OSError, ValueError) as exc:
     abbruch("FEHLER: pyproject.toml ist nicht lesbar: %s" % exc)
-
-build_system = pyproject.get("build-system", {})
 
 # Der Default kommt aus PEP 517: fehlt build-backend, gilt das
 # Legacy-Setuptools-Backend, das auch ein reines setup.py-Projekt baut.
@@ -176,13 +271,17 @@ elif PackageNotFoundError is not None:
             fehlend.append("%s (installiert: %s)" % (anforderung, vorhanden))
 
 if fehlend:
-    abbruch(
+    # rc 3, nicht 1: build-sdist.sh weicht damit auf eine vorhandene setup.py
+    # aus. Genau dafuer legt man eine an, wenn das setuptools auf dem Agent zu
+    # alt fuer die [project]-Metadaten ist.
+    sys.stderr.write(
         "FEHLER: build-system.requires aus pyproject.toml ist nicht erfuellt.\n"
         "        Ohne python-build wird nichts nachinstalliert, und ein Bau mit\n"
         "        den falschen Werkzeugen ergibt still ein falsches Archiv\n"
         "        (typisch: UNKNOWN-0.0.0).\n"
-        "        Es fehlt: %s" % ", ".join(fehlend)
+        "        Es fehlt: %s\n" % ", ".join(fehlend)
     )
+    raise SystemExit(3)
 if ungeprueft:
     sys.stderr.write(
         "HINWEIS: ohne das Modul 'packaging' nicht pruefbar (Umgebungsmarker): "
@@ -216,7 +315,17 @@ if attribut:
 # in eine Kopie baut.
 sys.stderr.write("%s\n" % backend.build_sdist(outdir))
 PY
-  ) >&2
+  ) >&2 || PEP517_RC=$?
+  # rc 3 heisst: build-system.requires ist nicht erfuellt (die Meldung steht
+  # schon im Log). Liegt eine setup.py daneben, ist sie genau fuer diesen Fall
+  # da - etwa wenn das setuptools auf dem Agent zu alt fuer die
+  # [project]-Metadaten ist. Jeder andere Fehler bleibt ein Fehler.
+  if [[ $PEP517_RC -eq 3 && -f "$PKG/setup.py" ]]; then
+    echo "HINWEIS: weiche auf 'setup.py sdist' aus - die Datei ist fuer genau diesen Fall da" >&2
+    ( cd "$PKG" && python3 setup.py --quiet sdist --dist-dir "$STAGE" ) >&2
+  elif [[ $PEP517_RC -ne 0 ]]; then
+    exit 1
+  fi
 elif [[ -f "$PKG/setup.py" ]]; then
   echo "HINWEIS: python-build nicht installiert und keine pyproject.toml, nutze 'setup.py sdist'" >&2
   ( cd "$PKG" && python3 setup.py --quiet sdist --dist-dir "$STAGE" ) >&2
@@ -277,6 +386,21 @@ DIST_VER="$(sed -n '/^Version: /{
 s/^Version: //p
 q
 }' <<<"$META")"
+# Riegel gegen das klassische Symptom eines zu alten setuptools: es kann die
+# [project]-Metadaten aus pyproject.toml nicht lesen (erst ab Version 61),
+# baut aber trotzdem klaglos durch - heraus kommt eine formal gueltige sdist
+# namens UNKNOWN mit Version 0.0.0. Ohne diesen Riegel landet die im Nexus.
+if [[ -z "$DIST_NAME" || "$DIST_NAME" == "UNKNOWN" || "$DIST_VER" == "0.0.0" ]]; then
+  echo "FEHLER: die gebaute sdist heisst '${DIST_NAME:-<leer>}' ${DIST_VER:-<leer>} -" >&2
+  echo "        das ist keine echte Paketkennung, sondern das, was setuptools" >&2
+  echo "        einsetzt, wenn es die Metadaten nicht lesen konnte. Typische" >&2
+  echo "        Ursache: setuptools aelter als Version 61, das die" >&2
+  echo "        [project]-Tabelle aus pyproject.toml noch nicht kennt." >&2
+  echo "        Abhilfe: eine setup.py mit Name und Version im Paket ablegen," >&2
+  echo "        oder ein neueres setuptools bzw. python-build bereitstellen." >&2
+  exit 1
+fi
+
 # Bei '.' ist das Repo selbst das Paket - "Ordner '.'" waere missverstaendlich.
 if [[ "$PKG" == "." ]]; then
   echo "Repo-Wurzel -> ${DIST_NAME} ${DIST_VER}" >&2

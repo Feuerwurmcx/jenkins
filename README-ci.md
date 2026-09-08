@@ -306,14 +306,28 @@ Duplikat faengt dann weiterhin der 400-Pfad ab, nur eine HTTP-Runde spaeter.
      etwa bei einem Backend, das importierbar ist, aber keine
      Distributionsmetadaten mitbringt: `SKIP_REQUIRES_CHECK=1`. Das steht
      dann als Zeile im Log.
-   * **Die `pyproject.toml` ist nicht lesbar** - kaputtes TOML, oder weder
-     `tomllib` (Python >= 3.11) noch `tomli` vorhanden. Welches Backend gilt,
-     steht nur in dieser Datei; geraten wird nicht. Ein angenommenes
-     setuptools wuerde ein Poetry- oder Hatch-Projekt unter falschem Namen und
-     mit Version `0.0.0` durchbauen.
+   * **Die `pyproject.toml` ist nicht lesbar.** Fehlen `tomllib` (Python >=
+     3.11) und `tomli`, liest ein Minimalparser nur die Tabelle
+     `[build-system]` - die drei Schluessel `build-backend`, `requires` und
+     `backend-path`, in den ueblichen Schreibweisen, mehrzeilige Listen und
+     Kommentare eingeschlossen; fremde Schluessel ignoriert er wie ein echter
+     TOML-Parser. Was er nicht sicher versteht, bricht ab: geraten wird nicht.
+     Ein angenommenes setuptools wuerde ein Poetry- oder Hatch-Projekt unter
+     falschem Namen und mit Version `0.0.0` durchbauen.
    * **Das Backend ist nicht importierbar.** Die Meldung nennt den
      Backend-Namen und die `requires`-Liste.
-3. **`setup.py sdist`**, nur fuer Pakete ganz ohne `pyproject.toml`.
+3. **`setup.py sdist`** - fuer Pakete ganz ohne `pyproject.toml`, und als
+   Ausweg, wenn Weg 2 an unerfuellten `build-system.requires` scheitert und
+   eine `setup.py` daneben liegt. Genau dafuer legt man eine an, wenn das
+   `setuptools` auf dem Agent zu alt fuer die `[project]`-Metadaten ist
+   (das ist es vor Version 61). Jeder andere Fehler aus Weg 2 bleibt ein
+   Fehler - ein kaputtes Backend soll nicht durch die Hintertuer gebaut
+   werden.
+
+**Riegel gegen `UNKNOWN-0.0.0`:** heisst die gebaute sdist `UNKNOWN` oder
+traegt sie Version `0.0.0`, wird sie abgelehnt statt hochgeladen. Das ist,
+was setuptools einsetzt, wenn es die Metadaten nicht lesen konnte - formal
+eine gueltige sdist, inhaltlich Muell.
 
 Ein Paket, das nur eine `setup.cfg` hat, ist ohne `python3 -m build` nicht
 baubar - das Skript sagt das und bricht mit Exit 1 ab, statt an einer nicht

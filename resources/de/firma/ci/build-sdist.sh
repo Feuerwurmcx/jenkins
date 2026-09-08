@@ -58,50 +58,137 @@ import sys
 
 outdir = sys.argv[1]
 
-# tomllib gibt es erst ab Python 3.11; tomli ist dasselbe Modul davor. Fehlen
-# beide, wird das Standard-Backend angenommen, statt hier aufzugeben - falsch
-# liegt das nur bei einem Projekt mit exotischem Backend, und das faellt dann
-# beim Import unten laut auf.
+# sys.path[0] ist bei 'python3 -' das aktuelle Verzeichnis, also der
+# Paketordner - er stuende damit VOR site-packages. Ein Modul im Projekt, das
+# so heisst wie eines, das das Backend importiert (z. B. ein Ordner
+# 'packaging/'), wuerde das Backend sprengen. python-build und
+# pyproject_hooks tun das ausdruecklich nicht, also hier auch nicht.
+if sys.path and sys.path[0] in ("", os.getcwd()):
+    del sys.path[0]
+
+
+def abbruch(text):
+    sys.stderr.write(text.rstrip() + "\n")
+    raise SystemExit(1)
+
+
+# tomllib gibt es erst ab Python 3.11; tomli ist dasselbe Modul davor.
+# Fehlen beide, wird NICHT geraten: welches Backend gilt, steht nur in der
+# pyproject.toml. Ein angenommenes setuptools baut ein Poetry- oder
+# Hatch-Projekt zwar oft ohne Fehler durch - aber unter falschem Namen und
+# mit Version 0.0.0, und publish-pypi.sh laedt das anschliessend hoch.
 try:
     import tomllib
 except ModuleNotFoundError:
     try:
         import tomli as tomllib
     except ModuleNotFoundError:
-        tomllib = None
+        abbruch(
+            "FEHLER: pyproject.toml ist nicht lesbar - weder tomllib (Python\n"
+            "        >= 3.11) noch tomli sind vorhanden. Welches Build-Backend\n"
+            "        gilt, steht nur in dieser Datei; geraten wird hier nicht.\n"
+            "        Abhilfe: python-build installieren, oder tomli, oder\n"
+            "        Python >= 3.11 verwenden."
+        )
 
-build_system = {}
-if tomllib is not None:
+try:
     with open("pyproject.toml", "rb") as fh:
-        build_system = tomllib.load(fh).get("build-system", {})
-else:
-    sys.stderr.write(
-        "HINWEIS: weder tomllib (Python >= 3.11) noch tomli - nehme "
-        "setuptools.build_meta als Backend an\n"
-    )
+        pyproject = tomllib.load(fh)
+except (OSError, ValueError) as exc:
+    abbruch("FEHLER: pyproject.toml ist nicht lesbar: %s" % exc)
+
+build_system = pyproject.get("build-system", {})
 
 # Der Default kommt aus PEP 517: fehlt build-backend, gilt das
 # Legacy-Setuptools-Backend, das auch ein reines setup.py-Projekt baut.
 backend_name = build_system.get("build-backend", "setuptools.build_meta:__legacy__")
+requires = build_system.get("requires", [])
+
+# Ohne Isolation wird nichts nachinstalliert - also vorher pruefen, ob da ist,
+# was das Projekt verlangt. Sonst baut ein zu altes setuptools ein Archiv, das
+# aussieht wie eine sdist, aber "UNKNOWN-0.0.0" heisst; ein reiner
+# ImportError-Fang unten sieht das nicht, weil der Import ja gelingt.
+def verteilungsname(anforderung):
+    name = ""
+    for zeichen in anforderung.strip():
+        if zeichen.isalnum() or zeichen in "._-":
+            name += zeichen
+        else:
+            break
+    return name
+
+
+fehlend = []
+ungeprueft = []
+try:
+    from packaging.requirements import Requirement  # oft nicht installiert
+except ModuleNotFoundError:
+    Requirement = None
+
+try:
+    from importlib.metadata import PackageNotFoundError, version as installierte_version
+except ModuleNotFoundError:  # Python < 3.8
+    PackageNotFoundError = None
+
+if PackageNotFoundError is not None:
+    for anforderung in requires:
+        if Requirement is not None:
+            req = Requirement(anforderung)
+            if req.marker is not None and not req.marker.evaluate():
+                continue   # gilt fuer diese Umgebung gar nicht
+            name, spezifikation = req.name, req.specifier
+        else:
+            if ";" in anforderung:
+                # Umgebungsmarker koennen wir ohne packaging nicht auswerten -
+                # lieber ueberspringen als faelschlich blockieren.
+                ungeprueft.append(anforderung)
+                continue
+            name, spezifikation = verteilungsname(anforderung), None
+        if not name:
+            continue
+        try:
+            vorhanden = installierte_version(name)
+        except PackageNotFoundError:
+            fehlend.append("%s (nicht installiert)" % anforderung)
+            continue
+        if spezifikation is not None and vorhanden not in spezifikation:
+            fehlend.append("%s (installiert: %s)" % (anforderung, vorhanden))
+
+if fehlend:
+    abbruch(
+        "FEHLER: build-system.requires aus pyproject.toml ist nicht erfuellt.\n"
+        "        Ohne python-build wird nichts nachinstalliert, und ein Bau mit\n"
+        "        den falschen Werkzeugen ergibt still ein falsches Archiv\n"
+        "        (typisch: UNKNOWN-0.0.0).\n"
+        "        Es fehlt: %s" % ", ".join(fehlend)
+    )
+if ungeprueft:
+    sys.stderr.write(
+        "HINWEIS: ohne das Modul 'packaging' nicht pruefbar (Umgebungsmarker): "
+        "%s\n" % ", ".join(ungeprueft)
+    )
+if Requirement is None and requires:
+    sys.stderr.write(
+        "HINWEIS: ohne das Modul 'packaging' wurde nur geprueft, OB die "
+        "build-requires installiert sind, nicht in welcher Version\n"
+    )
 
 # backend-path: ein Backend, das im Projekt selbst liegt (PEP 517).
-for entry in build_system.get("backend-path", []):
-    sys.path.insert(0, os.path.abspath(entry))
+for eintrag in build_system.get("backend-path", []):
+    sys.path.insert(0, os.path.abspath(eintrag))
 
-module_name, _, attribute = backend_name.partition(":")
+modulname, _, attribut = backend_name.partition(":")
 try:
-    backend = importlib.import_module(module_name)
+    backend = importlib.import_module(modulname)
 except ImportError as exc:
-    requires = build_system.get("requires", [])
-    sys.stderr.write(
+    abbruch(
         "FEHLER: Backend '%s' aus pyproject.toml ist nicht importierbar (%s).\n"
         "        Ohne python-build wird nichts nachinstalliert - was unter\n"
         "        build-system.requires steht, muss auf dem Agent vorhanden\n"
-        "        sein. Verlangt wird: %s\n" % (backend_name, exc, requires or "(nichts)")
+        "        sein. Verlangt wird: %s" % (backend_name, exc, requires or "(nichts)")
     )
-    raise SystemExit(1)
-if attribute:
-    backend = getattr(backend, attribute)
+if attribut:
+    backend = getattr(backend, attribut)
 
 # Das Backend legt beim sdist-Bau *.egg-info im Quellbaum an. Im
 # Jenkins-Workspace ist das folgenlos; python-build vermeidet es nur, weil es

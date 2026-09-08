@@ -487,6 +487,146 @@ assert_contains "ohne python-build: nur setup.cfg -> verstaendliche Meldung" \
      bash "$SCRIPTS/build-sdist.sh" delta 2>&1 >/dev/null)" \
   "weder pyproject.toml noch"
 
+# --- Der PEP-517-Zweig mit ECHTEM python3 -------------------------------
+# Der Stub oben verwirft das Python-Skript (cat >/dev/null) und prueft nur den
+# Bash-Teil. Damit blieb der ganze Python-Kern ungetestet, sobald kein echtes
+# Backend da war - und genau dieser Kern ist auf dem Jenkins-Agent der
+# Produktionspfad, weil dort python-build fehlt.
+#
+# Die folgenden Faelle brauchen KEIN setuptools: ein In-Tree-Backend nach PEP
+# 517 (backend-path) genuegt, und die Fehlerpfade fallen ohnehin vor jedem
+# Backend-Import an. Gebraucht wird nur ein python3, bei dem 'import build'
+# fehlschlaegt - dafuer der Wrapper unten, damit die Tests auch auf einem
+# Rechner MIT python-build den richtigen Zweig fahren.
+NB_BIN="${TMP}/nobuild-bin"; mkdir -p "$NB_BIN"
+REAL_PY3="$(command -v python3 || true)"
+cat > "${NB_BIN}/python3" <<NBSTUB
+#!/usr/bin/env bash
+# Echtes python3 - nur die Sonde 'import build' schlaegt fehl, damit
+# build-sdist.sh den PEP-517-Zweig nimmt.
+if [[ "\${1:-}" == "-c" && "\${2:-}" == "import build" ]]; then exit 1; fi
+exec "${REAL_PY3}" "\$@"
+NBSTUB
+chmod +x "${NB_BIN}/python3"
+
+if [[ -z "$REAL_PY3" ]]; then
+  skip "PEP-517-Zweig mit echtem python3" "kein python3 gefunden"
+else
+  # In-Tree-Backend: baut ein Minimalarchiv, das build-sdist.sh als gueltige
+  # sdist akzeptiert. Pinnt damit backend-path, die Aufteilung modul:attribut,
+  # das getattr, das Arbeitsverzeichnis und den Rueckgabewert - alles ohne
+  # eine einzige Abhaengigkeit.
+  P517="${TMP}/pep517"; rm -rf "$P517"; mkdir -p "$P517/eigen/_backend"
+  cat > "$P517/eigen/pyproject.toml" <<'TOML'
+[build-system]
+requires = []
+build-backend = "eigenes_backend:api"
+backend-path = ["_backend"]
+TOML
+  cat > "$P517/eigen/_backend/eigenes_backend.py" <<'PYBK'
+import io, os, tarfile, time
+
+class _Api:
+    def build_sdist(self, sdist_directory, config_settings=None):
+        # Beweist nebenbei, dass das Backend IM Paketordner laeuft.
+        assert os.path.isfile("pyproject.toml"), "falsches Arbeitsverzeichnis: %s" % os.getcwd()
+        name = "eigenes-7.7.tar.gz"
+        info = b"Metadata-Version: 2.1\nName: eigenes\nVersion: 7.7\n"
+        with tarfile.open(os.path.join(sdist_directory, name), "w:gz") as tar:
+            ti = tarfile.TarInfo("eigenes-7.7/PKG-INFO")
+            ti.size = len(info); ti.mtime = int(time.time())
+            tar.addfile(ti, io.BytesIO(info))
+        return name
+
+api = _Api()
+PYBK
+  # Ein Modul, das so heisst wie eines, das der Aufruf selbst braucht: liegt
+  # der Paketordner faelschlich in sys.path, wird DIESES importiert und der
+  # Bau stirbt. Gegenprobe zum Loeschen von sys.path[0].
+  printf 'raise RuntimeError("Modul aus dem Projekt darf hier nicht importiert werden")\n' \
+    > "$P517/eigen/tomllib.py"
+
+  OUT_P="$(cd "$P517" && PATH="${NB_BIN}:${PATH}" bash "$SCRIPTS/build-sdist.sh" eigen 2>/dev/null)"; RC_P=$?
+  assert_rc "PEP 517: In-Tree-Backend baut (rc 0)" 0 "$RC_P"
+  assert_eq "PEP 517: Archivpfad kommt aus den Metadaten" "dist/eigenes-7.7.tar.gz" "$OUT_P"
+  assert_eq "PEP 517: Name aus der gebauten sdist" "eigenes" \
+    "$(bash "$SCRIPTS/sdist-meta.sh" "${P517}/${OUT_P}" name 2>/dev/null)"
+  assert_eq "PEP 517: stdout enthaelt NUR den Archivpfad" "1" \
+    "$(printf '%s\n' "$OUT_P" | wc -l | tr -d ' ')"
+
+  # Fehlerpfade - alle ohne Backend, alle mit klarer Meldung statt Python-Traceback.
+  mk517() {  # <name> <inhalt pyproject.toml>
+    local d="${TMP}/p517-$1"; rm -rf "$d"; mkdir -p "$d/pkg"
+    printf '%s\n' "$2" > "$d/pkg/pyproject.toml"
+    printf '%s\n' "$d"
+  }
+
+  # Fehlendes [build-system]: laut PEP 517 gilt dann das Legacy-Setuptools-
+  # Backend. Das pinnt den Default - ohne setuptools scheitert der Import, und
+  # die Meldung nennt genau diesen Namen.
+  D_DEF="$(mk517 default '[project]
+name = "x"
+version = "1.0"')"
+  ERR_DEF="$(cd "$D_DEF" && PATH="${NB_BIN}:${PATH}" bash "$SCRIPTS/build-sdist.sh" pkg 2>&1 >/dev/null)"
+  if python3 -c 'import setuptools' 2>/dev/null; then
+    skip "PEP 517: Default-Backend laut PEP 517" "setuptools ist installiert, der Import gelingt"
+  else
+    assert_contains "PEP 517: Default-Backend laut PEP 517" "$ERR_DEF" \
+      "setuptools.build_meta:__legacy__"
+  fi
+
+  D_BK="$(mk517 kaputt '[build-system]
+requires = ["gibtsnicht-xyz"]
+build-backend = "gibtsnicht.backend"')"
+  OUT_BK="$(cd "$D_BK" && PATH="${NB_BIN}:${PATH}" bash "$SCRIPTS/build-sdist.sh" pkg 2>/dev/null)"; RC_BK=$?
+  ERR_BK="$(cd "$D_BK" && PATH="${NB_BIN}:${PATH}" bash "$SCRIPTS/build-sdist.sh" pkg 2>&1 >/dev/null)"
+  assert_rc "PEP 517: unbekanntes Backend -> rc 1" 1 "$RC_BK"
+  assert_eq "PEP 517: unbekanntes Backend -> keine Ausgabe auf stdout" "" "$OUT_BK"
+  assert_contains "PEP 517: Meldung nennt requires" "$ERR_BK" "gibtsnicht-xyz"
+  # Der Abbruch muss SOFORT erfolgen. Endet der Fehlerpfad versehentlich mit
+  # rc 0, laeuft build-sdist.sh weiter und scheitert erst an "erwartet genau
+  # eine sdist" - der Exit-Code bliebe 1, im Log staende aber eine
+  # Folgemeldung, die vom eigentlichen Grund ablenkt.
+  if grep -q 'erwartet genau eine sdist' <<<"$ERR_BK"; then
+    nok "PEP 517: unbekanntes Backend bricht sofort ab" "Folgefehler statt sauberem Abbruch"
+  else ok "PEP 517: unbekanntes Backend bricht sofort ab"; fi
+
+  # build-system.requires nicht erfuellt: ohne Isolation wird nichts
+  # nachinstalliert. Ein zu altes Werkzeug baut sonst still ein Archiv, das
+  # aussieht wie eine sdist, aber UNKNOWN-0.0.0 heisst.
+  D_REQ="$(mk517 requires '[build-system]
+requires = ["ganz-sicher-nicht-installiert-xyz"]
+build-backend = "eigenes.egal"')"
+  OUT_REQ="$(cd "$D_REQ" && PATH="${NB_BIN}:${PATH}" bash "$SCRIPTS/build-sdist.sh" pkg 2>/dev/null)"; RC_REQ=$?
+  ERR_REQ="$(cd "$D_REQ" && PATH="${NB_BIN}:${PATH}" bash "$SCRIPTS/build-sdist.sh" pkg 2>&1 >/dev/null)"
+  assert_rc "PEP 517: unerfuellte requires -> rc 1" 1 "$RC_REQ"
+  assert_eq "PEP 517: unerfuellte requires -> keine Ausgabe" "" "$OUT_REQ"
+  assert_contains "PEP 517: unerfuellte requires -> Meldung nennt das Paket" "$ERR_REQ" \
+    "ganz-sicher-nicht-installiert-xyz (nicht installiert)"
+  if grep -q 'erwartet genau eine sdist' <<<"$ERR_REQ"; then
+    nok "PEP 517: unerfuellte requires brechen sofort ab" "Folgefehler statt sauberem Abbruch"
+  else ok "PEP 517: unerfuellte requires brechen sofort ab"; fi
+
+  D_TOML="$(mk517 kaputtes-toml 'das ist [kein gueltiges TOML')"
+  RC_TOML=0
+  OUT_TOML="$(cd "$D_TOML" && PATH="${NB_BIN}:${PATH}" bash "$SCRIPTS/build-sdist.sh" pkg 2>/dev/null)" || RC_TOML=$?
+  assert_rc "PEP 517: kaputtes TOML -> rc 1" 1 "$RC_TOML"
+  assert_contains "PEP 517: kaputtes TOML -> verstaendliche Meldung" \
+    "$(cd "$D_TOML" && PATH="${NB_BIN}:${PATH}" bash "$SCRIPTS/build-sdist.sh" pkg 2>&1 >/dev/null)" \
+    "pyproject.toml ist nicht lesbar"
+
+  # Ohne TOML-Parser wird NICHT geraten: ein angenommenes setuptools baut ein
+  # Poetry-Projekt unter falschem Namen und mit Version 0.0.0 durch, und
+  # publish-pypi.sh laedt das hoch.
+  NOTOML="${TMP}/notomllib"; rm -rf "$NOTOML"; mkdir -p "$NOTOML"
+  printf 'raise ModuleNotFoundError("No module named %s")\n' "'tomllib'" > "$NOTOML/tomllib.py"
+  printf 'raise ModuleNotFoundError("No module named %s")\n' "'tomli'" > "$NOTOML/tomli.py"
+  ERR_NT="$(cd "$D_BK" && PATH="${NB_BIN}:${PATH}" PYTHONPATH="$NOTOML" \
+            bash "$SCRIPTS/build-sdist.sh" pkg 2>&1 >/dev/null)"
+  assert_contains "PEP 517: ohne TOML-Parser wird nicht geraten" "$ERR_NT" \
+    "geraten wird hier nicht"
+fi
+
 # Zusaetzlich mit echtem Backend, wenn eines da ist. Der Stub prueft nur den
 # Bash-Teil; erst hier zeigt sich, ob der Aufruf von python-build/setuptools
 # selbst stimmt. Aktivieren mit: python3 -m pip install --user build
@@ -501,6 +641,18 @@ if python3 -c 'import build' 2>/dev/null || python3 -c 'import setuptools' 2>/de
   else
     nok "echtes Backend: sdist gebaut" "kein Archiv unter ${REPO}/${ARCH}"
   fi
+  # fixture-single ist die Konstellation der echten Repos: explizites
+  # build-backend, [project] und src-Layout, gebaut als Wurzelpaket '.'.
+  SREPO_R="$(fixture_single_repo)"
+  ARCH_S="$(cd "$SREPO_R" && bash "$SCRIPTS/build-sdist.sh" . 2>/dev/null)"; RC_S=$?
+  assert_rc "echtes Backend: Wurzelpaket mit src-Layout rc 0" 0 "$RC_S"
+  if [[ -n "$ARCH_S" && -f "${SREPO_R}/${ARCH_S}" ]]; then
+    assert_eq "echtes Backend: Name des Wurzelpakets" "einzelpaket" \
+      "$(bash "$SCRIPTS/sdist-meta.sh" "${SREPO_R}/${ARCH_S}" name)"
+  else
+    nok "echtes Backend: Wurzelpaket gebaut" "kein Archiv unter ${SREPO_R}/${ARCH_S}"
+  fi
+
   # beta hat NUR eine pyproject.toml - ohne python-build laeuft das echt ueber
   # den PEP-517-Zweig. Genau der Fall, der bei einem Wurzelpaket auftritt.
   ARCH_B="$(cd "$REPO" && bash "$SCRIPTS/build-sdist.sh" beta 2>/dev/null)"; RC_B=$?

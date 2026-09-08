@@ -293,10 +293,23 @@ Duplikat faengt dann weiterhin der 400-Pfad ab, nur eine HTTP-Runde spaeter.
    denen `build` fehlt und nicht nachinstalliert werden darf, `setuptools`
    aber vorhanden ist. Ohne Isolation: was unter `build-system.requires`
    steht, muss schon installiert sein - es wird nichts aus dem Netz geholt.
-   Ist das Backend nicht importierbar, bricht das Skript mit einer Meldung ab,
-   die den Backend-Namen und die `requires`-Liste nennt.
    Im Log: `HINWEIS: python-build nicht installiert - rufe das Backend aus
    pyproject.toml direkt auf (PEP 517)`.
+
+   Drei Dinge brechen diesen Weg bewusst mit Exit 1 ab, statt weiterzumachen:
+   * **`build-system.requires` ist nicht erfuellt.** Ein zu altes setuptools
+     baut sonst ein Archiv, das aussieht wie eine sdist, aber `UNKNOWN-0.0.0`
+     heisst - und `publish-pypi.sh` laedt das hoch. Die Meldung nennt, was
+     fehlt. Ist das Modul `packaging` nicht da, wird nur geprueft, OB die
+     Pakete installiert sind, nicht in welcher Version; das steht dann als
+     Hinweis im Log.
+   * **Die `pyproject.toml` ist nicht lesbar** - kaputtes TOML, oder weder
+     `tomllib` (Python >= 3.11) noch `tomli` vorhanden. Welches Backend gilt,
+     steht nur in dieser Datei; geraten wird nicht. Ein angenommenes
+     setuptools wuerde ein Poetry- oder Hatch-Projekt unter falschem Namen und
+     mit Version `0.0.0` durchbauen.
+   * **Das Backend ist nicht importierbar.** Die Meldung nennt den
+     Backend-Namen und die `requires`-Liste.
 3. **`setup.py sdist`**, nur fuer Pakete ganz ohne `pyproject.toml`.
 
 Ein Paket, das nur eine `setup.cfg` hat, ist ohne `python3 -m build` nicht

@@ -120,6 +120,9 @@ set -euo pipefail
 # Aufrufe, die laut build-sdist.sh im Paketordner laufen sollen (-m build,
 # setup.py sdist) - nicht fuer 'python3 -c "import build"': das laeuft in
 # build-sdist.sh VOR dem 'cd "$PKG"', im Checkout-Wurzelverzeichnis.
+# Der PEP-517-Zweig ruft 'python3 - <outdir>' auf und schickt das Skript ueber
+# stdin - der Stub schluckt es, prueft aber wie die anderen Zweige das cwd und
+# die Argumente.
 check_cwd() {
   [[ -f setup.py || -f setup.cfg || -f pyproject.toml ]] || {
     echo "python3-stub: kein setup.py/setup.cfg/pyproject.toml im aktuellen Verzeichnis ($(pwd)) - build-sdist.sh haette hierher 'cd' sollen" >&2
@@ -134,6 +137,11 @@ case "${1:-}" in
       [[ "${2:-}" == build && "${3:-}" == --sdist && "${4:-}" == --outdir && -n "${5:-}" ]] \
         || { echo "python3-stub: unerwartete Argumente: $*" >&2; exit 2; }
       out="$5" ;;
+  -)  check_cwd
+      cat >/dev/null   # das Python-Skript kommt ueber stdin - verwerfen
+      [[ -n "${2:-}" && $# -eq 2 ]] \
+        || { echo "python3-stub: unerwartete Argumente (PEP-517-Zweig): $*" >&2; exit 2; }
+      out="$2" ;;
   setup.py) check_cwd
       [[ "${2:-}" == --quiet && "${3:-}" == sdist && "${4:-}" == --dist-dir && -n "${5:-}" ]] \
         || { echo "python3-stub: unerwartete Argumente (setup.py-Fallback): $*" >&2; exit 2; }
@@ -436,6 +444,49 @@ else
     "sed-Muster hat nicht gegriffen - Gegenprobe ungueltig, bitte Muster pruefen"
 fi
 
+# Ohne python-build: welcher Bauweg wird gewaehlt? Der Stub laesst 'import
+# build' scheitern (STUB_NO_BUILD=1) und meldet sich mit rc 2, wenn er anders
+# aufgerufen wird als der jeweilige Zweig es vorsieht. Damit ist der GEWAEHLTE
+# Weg gepinnt, nicht nur das Ergebnis.
+#
+# Vorher sprang fuer JEDES Paket 'setup.py sdist' ein, sobald python-build
+# fehlte. Ein Paket mit nur einer pyproject.toml - der Normalfall bei
+# src-Layout, und genau der Fall des Wurzelpakets - scheiterte damit an einer
+# nicht existierenden setup.py, obwohl setuptools alles Noetige hatte.
+REPO="$(fixture_repo)"
+OUT_517="$(cd "$REPO" && PATH="${STUB_BIN}:${PATH}" STUB_NO_BUILD=1 \
+  STUB_NAME='beta' STUB_VERSION='0.2.0' bash "$SCRIPTS/build-sdist.sh" beta 2>/dev/null)"; RC_517=$?
+assert_rc "ohne python-build: pyproject-Paket wird gebaut (rc 0)" 0 "$RC_517"
+assert_eq "ohne python-build: pyproject-Paket -> Archivpfad" "dist/beta-0.2.0.tar.gz" "$OUT_517"
+assert_contains "ohne python-build: pyproject-Paket nimmt den PEP-517-Weg" \
+  "$(cd "$REPO" && PATH="${STUB_BIN}:${PATH}" STUB_NO_BUILD=1 STUB_NAME='beta' STUB_VERSION='0.2.0' \
+     bash "$SCRIPTS/build-sdist.sh" beta 2>&1 >/dev/null)" \
+  "rufe das Backend aus pyproject.toml direkt auf (PEP 517)"
+
+# Ein Paket ohne pyproject.toml bleibt beim alten Weg - sonst waere die
+# Reihenfolge der Zweige vertauscht.
+OUT_LEG="$(cd "$REPO" && PATH="${STUB_BIN}:${PATH}" STUB_NO_BUILD=1 \
+  STUB_NAME='alpha' STUB_VERSION='1.0.0' bash "$SCRIPTS/build-sdist.sh" alpha 2>/dev/null)"; RC_LEG=$?
+assert_rc "ohne python-build: setup.py-Paket wird gebaut (rc 0)" 0 "$RC_LEG"
+assert_contains "ohne python-build: setup.py-Paket nimmt den setup.py-Weg" \
+  "$(cd "$REPO" && PATH="${STUB_BIN}:${PATH}" STUB_NO_BUILD=1 STUB_NAME='alpha' STUB_VERSION='1.0.0' \
+     bash "$SCRIPTS/build-sdist.sh" alpha 2>&1 >/dev/null)" \
+  "keine pyproject.toml, nutze 'setup.py sdist'"
+
+# Nur eine setup.cfg: kommt an der Metadatenpruefung oben vorbei, ist ohne
+# python-build aber nicht baubar. Das muss laut scheitern statt mit einem
+# unverstaendlichen Python-Fehler.
+CFGONLY="${TMP}/cfgonly"; rm -rf "$CFGONLY"; mkdir -p "$CFGONLY/delta"
+printf '[metadata]\nname = delta\nversion = 1.0\n' > "$CFGONLY/delta/setup.cfg"
+OUT_CFG="$(cd "$CFGONLY" && PATH="${STUB_BIN}:${PATH}" STUB_NO_BUILD=1 \
+  bash "$SCRIPTS/build-sdist.sh" delta 2>/dev/null)"; RC_CFG=$?
+assert_rc "ohne python-build: nur setup.cfg -> rc 1" 1 "$RC_CFG"
+assert_eq "ohne python-build: nur setup.cfg -> keine Ausgabe" "" "$OUT_CFG"
+assert_contains "ohne python-build: nur setup.cfg -> verstaendliche Meldung" \
+  "$(cd "$CFGONLY" && PATH="${STUB_BIN}:${PATH}" STUB_NO_BUILD=1 \
+     bash "$SCRIPTS/build-sdist.sh" delta 2>&1 >/dev/null)" \
+  "weder pyproject.toml noch"
+
 # Zusaetzlich mit echtem Backend, wenn eines da ist. Der Stub prueft nur den
 # Bash-Teil; erst hier zeigt sich, ob der Aufruf von python-build/setuptools
 # selbst stimmt. Aktivieren mit: python3 -m pip install --user build
@@ -449,6 +500,17 @@ if python3 -c 'import build' 2>/dev/null || python3 -c 'import setuptools' 2>/de
       "$(bash "$SCRIPTS/sdist-meta.sh" "${REPO}/${ARCH}" version)"
   else
     nok "echtes Backend: sdist gebaut" "kein Archiv unter ${REPO}/${ARCH}"
+  fi
+  # beta hat NUR eine pyproject.toml - ohne python-build laeuft das echt ueber
+  # den PEP-517-Zweig. Genau der Fall, der bei einem Wurzelpaket auftritt.
+  ARCH_B="$(cd "$REPO" && bash "$SCRIPTS/build-sdist.sh" beta 2>/dev/null)"; RC_B=$?
+  assert_rc "echtes Backend: pyproject-Paket rc 0" 0 "$RC_B"
+  if [[ -n "$ARCH_B" && -f "${REPO}/${ARCH_B}" ]]; then
+    ok "echtes Backend: sdist aus pyproject.toml gebaut: $ARCH_B"
+    assert_eq "echtes Backend: Version aus der pyproject-sdist" "0.2.0" \
+      "$(bash "$SCRIPTS/sdist-meta.sh" "${REPO}/${ARCH_B}" version)"
+  else
+    nok "echtes Backend: sdist aus pyproject.toml gebaut" "kein Archiv unter ${REPO}/${ARCH_B}"
   fi
 else
   skip "build-sdist.sh mit echtem Backend" "python-build/setuptools fehlen (Stub-Backend oben deckt den Bash-Teil ab; 'python3 -m pip install --user build' aktiviert diesen Test)"

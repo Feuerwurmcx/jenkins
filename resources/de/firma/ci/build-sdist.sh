@@ -29,11 +29,94 @@ ABS_OUT="$(cd "$OUT_DIR" && pwd)"
 STAGE="$(mktemp -d "${ABS_OUT}/.build-${PKG//\//_}-XXXXXX")"
 trap 'rm -rf "$STAGE"' EXIT
 
+# Drei Wege, in dieser Reihenfolge:
+#
+#   1. python-build ('python3 -m build'). Das ist das Standard-Frontend; es
+#      baut in einer isolierten Umgebung und installiert die build-requires
+#      selbst nach.
+#   2. Das in pyproject.toml deklarierte Backend direkt aufrufen (PEP 517).
+#      Fuer Agents, auf denen python-build fehlt und nicht nachinstalliert
+#      werden darf, aber setuptools da ist. Ohne Isolation: was unter
+#      build-system.requires steht, muss schon installiert sein - hier wird
+#      nichts aus dem Netz geholt.
+#   3. 'setup.py sdist' als letzter Ausweg, nur fuer Pakete ganz ohne
+#      pyproject.toml.
+#
+# Frueher fehlte Weg 2, und Weg 3 sprang fuer JEDES Paket ein, sobald
+# python-build fehlte. Bei einem Paket, das nur eine pyproject.toml hat -
+# der Normalfall bei src-Layout - scheiterte das mit "can't open file
+# setup.py", obwohl setuptools alles hatte, was noetig war.
 if python3 -c 'import build' 2>/dev/null; then
   ( cd "$PKG" && python3 -m build --sdist --outdir "$STAGE" ) >&2
-else
-  echo "HINWEIS: python-build nicht installiert, nutze 'setup.py sdist'" >&2
+elif [[ -f "$PKG/pyproject.toml" ]]; then
+  echo "HINWEIS: python-build nicht installiert - rufe das Backend aus pyproject.toml direkt auf (PEP 517)" >&2
+  (
+    cd "$PKG" && python3 - "$STAGE" <<'PY'
+import importlib
+import os
+import sys
+
+outdir = sys.argv[1]
+
+# tomllib gibt es erst ab Python 3.11; tomli ist dasselbe Modul davor. Fehlen
+# beide, wird das Standard-Backend angenommen, statt hier aufzugeben - falsch
+# liegt das nur bei einem Projekt mit exotischem Backend, und das faellt dann
+# beim Import unten laut auf.
+try:
+    import tomllib
+except ModuleNotFoundError:
+    try:
+        import tomli as tomllib
+    except ModuleNotFoundError:
+        tomllib = None
+
+build_system = {}
+if tomllib is not None:
+    with open("pyproject.toml", "rb") as fh:
+        build_system = tomllib.load(fh).get("build-system", {})
+else:
+    sys.stderr.write(
+        "HINWEIS: weder tomllib (Python >= 3.11) noch tomli - nehme "
+        "setuptools.build_meta als Backend an\n"
+    )
+
+# Der Default kommt aus PEP 517: fehlt build-backend, gilt das
+# Legacy-Setuptools-Backend, das auch ein reines setup.py-Projekt baut.
+backend_name = build_system.get("build-backend", "setuptools.build_meta:__legacy__")
+
+# backend-path: ein Backend, das im Projekt selbst liegt (PEP 517).
+for entry in build_system.get("backend-path", []):
+    sys.path.insert(0, os.path.abspath(entry))
+
+module_name, _, attribute = backend_name.partition(":")
+try:
+    backend = importlib.import_module(module_name)
+except ImportError as exc:
+    requires = build_system.get("requires", [])
+    sys.stderr.write(
+        "FEHLER: Backend '%s' aus pyproject.toml ist nicht importierbar (%s).\n"
+        "        Ohne python-build wird nichts nachinstalliert - was unter\n"
+        "        build-system.requires steht, muss auf dem Agent vorhanden\n"
+        "        sein. Verlangt wird: %s\n" % (backend_name, exc, requires or "(nichts)")
+    )
+    raise SystemExit(1)
+if attribute:
+    backend = getattr(backend, attribute)
+
+# Das Backend legt beim sdist-Bau *.egg-info im Quellbaum an. Im
+# Jenkins-Workspace ist das folgenlos; python-build vermeidet es nur, weil es
+# in eine Kopie baut.
+sys.stderr.write("%s\n" % backend.build_sdist(outdir))
+PY
+  ) >&2
+elif [[ -f "$PKG/setup.py" ]]; then
+  echo "HINWEIS: python-build nicht installiert und keine pyproject.toml, nutze 'setup.py sdist'" >&2
   ( cd "$PKG" && python3 setup.py --quiet sdist --dist-dir "$STAGE" ) >&2
+else
+  echo "FEHLER: $PKG hat nur eine setup.cfg, aber weder pyproject.toml noch" >&2
+  echo "        setup.py - und python-build ist nicht installiert. Ohne eines" >&2
+  echo "        von beidem gibt es keinen Weg, daraus eine sdist zu bauen." >&2
+  exit 1
 fi
 
 # Kein 'mapfile': das ist ein Bash-4-Builtin und existiert unter macOS'

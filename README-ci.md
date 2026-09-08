@@ -31,10 +31,9 @@ laeuft:
 * `tar` (`build-sdist.sh`, `sdist-meta.sh`)
 * `curl` (`publish-pypi.sh`, Repo-Typ-Check, Simple-Index-Abfrage vor dem
   Upload und der Upload selbst - alle drei gegen die Nexus-REST-API)
-* `python3` mit `build` (`python3 -m pip install --user build`) oder ersatzweise
-  `setuptools` (`build-sdist.sh` faellt sonst auf `setup.py sdist` zurueck);
-  `publish-pypi.sh` braucht ausserdem nacktes `python3` (Stdlib genuegt) fuer
-  den Repo-Typ-Check
+* `python3` mit `build` **oder** `setuptools` (siehe "Womit die sdist gebaut
+  wird" unten); `publish-pypi.sh` braucht ausserdem nacktes `python3` (Stdlib
+  genuegt) fuer den Repo-Typ-Check
 
 Ausdruecklich **nicht** noetig ist `twine`: der Upload laeuft per `curl` gegen
 die Nexus-REST-Components-API.
@@ -282,6 +281,35 @@ nichts hochgeladen. Ist der Repo-Typ nicht bestaetigt - REST-API nicht
 erreichbar, Repo in der API nicht gefunden, oder `SKIP_REPO_CHECK=1` - wird
 deshalb auch die Simple-Index-Vorabpruefung uebersprungen; ein echtes
 Duplikat faengt dann weiterhin der 400-Pfad ab, nur eine HTTP-Runde spaeter.
+
+## Womit die sdist gebaut wird
+
+`build-sdist.sh` kennt drei Wege und nimmt den ersten, der moeglich ist:
+
+1. **`python3 -m build`**, das Standard-Frontend. Es baut in einer isolierten
+   Umgebung und installiert die Abhaengigkeiten aus `build-system.requires`
+   selbst nach. Wenn es da ist, ist es der richtige Weg.
+2. **Das Backend aus `pyproject.toml` direkt (PEP 517).** Fuer Agents, auf
+   denen `build` fehlt und nicht nachinstalliert werden darf, `setuptools`
+   aber vorhanden ist. Ohne Isolation: was unter `build-system.requires`
+   steht, muss schon installiert sein - es wird nichts aus dem Netz geholt.
+   Ist das Backend nicht importierbar, bricht das Skript mit einer Meldung ab,
+   die den Backend-Namen und die `requires`-Liste nennt.
+   Im Log: `HINWEIS: python-build nicht installiert - rufe das Backend aus
+   pyproject.toml direkt auf (PEP 517)`.
+3. **`setup.py sdist`**, nur fuer Pakete ganz ohne `pyproject.toml`.
+
+Ein Paket, das nur eine `setup.cfg` hat, ist ohne `python3 -m build` nicht
+baubar - das Skript sagt das und bricht mit Exit 1 ab, statt an einer nicht
+existierenden `setup.py` zu scheitern.
+
+Fuer ein Wurzelpaket (`rootPackage`) gilt dasselbe, nur relativ zur
+Repo-Wurzel: dort muss die `pyproject.toml` bzw. `setup.py` liegen. Bei
+src-Layout ist Weg 2 der Normalfall, wenn `build` fehlt.
+
+Nebenwirkung von Weg 2: das Backend legt beim Bau `*.egg-info` im Quellbaum
+an. Im Jenkins-Workspace ist das folgenlos; `python3 -m build` vermeidet es
+nur, weil es in eine Kopie baut.
 
 ## Welche Pakete werden gebaut
 

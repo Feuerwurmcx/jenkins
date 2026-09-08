@@ -118,6 +118,14 @@ def verteilungsname(anforderung):
     return name
 
 
+# Notausgang: die Pruefung kann selbst danebenliegen - ein Backend, das
+# importierbar ist, aber keine Distributionsmetadaten mitbringt (vendored,
+# aus dem Quellbaum), gilt ihr als "nicht installiert". Wer weiss, dass sein
+# Agent stimmt, schaltet sie ab. Laut, damit es im Log steht.
+pruefung_aus = os.environ.get("SKIP_REQUIRES_CHECK", "").strip().lower() in (
+    "1", "true", "yes", "on", "ja"
+)
+
 fehlend = []
 ungeprueft = []
 try:
@@ -130,10 +138,23 @@ try:
 except ModuleNotFoundError:  # Python < 3.8
     PackageNotFoundError = None
 
-if PackageNotFoundError is not None:
+if pruefung_aus:
+    sys.stderr.write(
+        "HINWEIS: SKIP_REQUIRES_CHECK gesetzt - build-system.requires wird "
+        "nicht geprueft\n"
+    )
+elif PackageNotFoundError is not None:
     for anforderung in requires:
         if Requirement is not None:
-            req = Requirement(anforderung)
+            try:
+                req = Requirement(anforderung)
+            except Exception as exc:
+                # Eine unlesbare Zeile ist ein Fehler im Projekt, kein Grund
+                # fuer einen Traceback aus diesem Skript.
+                abbruch(
+                    "FEHLER: build-system.requires enthaelt einen Eintrag, den "
+                    "ich nicht lesen kann:\n        %r (%s)" % (anforderung, exc)
+                )
             if req.marker is not None and not req.marker.evaluate():
                 continue   # gilt fuer diese Umgebung gar nicht
             name, spezifikation = req.name, req.specifier

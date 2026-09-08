@@ -302,7 +302,10 @@ Duplikat faengt dann weiterhin der 400-Pfad ab, nur eine HTTP-Runde spaeter.
      heisst - und `publish-pypi.sh` laedt das hoch. Die Meldung nennt, was
      fehlt. Ist das Modul `packaging` nicht da, wird nur geprueft, OB die
      Pakete installiert sind, nicht in welcher Version; das steht dann als
-     Hinweis im Log.
+     Hinweis im Log. Notausgang, falls die Pruefung selbst danebenliegt -
+     etwa bei einem Backend, das importierbar ist, aber keine
+     Distributionsmetadaten mitbringt: `SKIP_REQUIRES_CHECK=1`. Das steht
+     dann als Zeile im Log.
    * **Die `pyproject.toml` ist nicht lesbar** - kaputtes TOML, oder weder
      `tomllib` (Python >= 3.11) noch `tomli` vorhanden. Welches Backend gilt,
      steht nur in dieser Datei; geraten wird nicht. Ein angenommenes

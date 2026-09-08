@@ -575,14 +575,17 @@ version = "1.0"')"
       "setuptools.build_meta:__legacy__"
   fi
 
+  # requires bewusst leer: sonst bricht schon die requires-Pruefung ab und
+  # der Import-Fehlerpfad wird nie erreicht.
   D_BK="$(mk517 kaputt '[build-system]
-requires = ["gibtsnicht-xyz"]
+requires = []
 build-backend = "gibtsnicht.backend"')"
   OUT_BK="$(cd "$D_BK" && PATH="${NB_BIN}:${PATH}" bash "$SCRIPTS/build-sdist.sh" pkg 2>/dev/null)"; RC_BK=$?
   ERR_BK="$(cd "$D_BK" && PATH="${NB_BIN}:${PATH}" bash "$SCRIPTS/build-sdist.sh" pkg 2>&1 >/dev/null)"
   assert_rc "PEP 517: unbekanntes Backend -> rc 1" 1 "$RC_BK"
   assert_eq "PEP 517: unbekanntes Backend -> keine Ausgabe auf stdout" "" "$OUT_BK"
-  assert_contains "PEP 517: Meldung nennt requires" "$ERR_BK" "gibtsnicht-xyz"
+  assert_contains "PEP 517: Meldung nennt das Backend" "$ERR_BK" "gibtsnicht.backend"
+  assert_contains "PEP 517: Meldung nennt die requires-Liste" "$ERR_BK" "(nichts)"
   # Der Abbruch muss SOFORT erfolgen. Endet der Fehlerpfad versehentlich mit
   # rc 0, laeuft build-sdist.sh weiter und scheitert erst an "erwartet genau
   # eine sdist" - der Exit-Code bliebe 1, im Log staende aber eine
@@ -606,6 +609,55 @@ build-backend = "eigenes.egal"')"
   if grep -q 'erwartet genau eine sdist' <<<"$ERR_REQ"; then
     nok "PEP 517: unerfuellte requires brechen sofort ab" "Folgefehler statt sauberem Abbruch"
   else ok "PEP 517: unerfuellte requires brechen sofort ab"; fi
+
+  # Installiert, aber zu ALT. Ohne diesen Fall bliebe der Versionsvergleich
+  # ungeprueft: eine reine Anwesenheitspruefung waere gruen geblieben, und
+  # genau daraus entsteht das UNKNOWN-0.0.0-Archiv.
+  FAKESITE="${TMP}/fakesite"; rm -rf "$FAKESITE"
+  mkdir -p "$FAKESITE/testpaket_xyz-1.0.dist-info"
+  printf 'Metadata-Version: 2.1\nName: testpaket-xyz\nVersion: 1.0\n' \
+    > "$FAKESITE/testpaket_xyz-1.0.dist-info/METADATA"
+  D_ALT="$(mk517 zualt '[build-system]
+requires = ["testpaket-xyz>=2.0"]
+build-backend = "gibtsnicht.backend"')"
+  if PYTHONPATH="$FAKESITE" python3 -c 'import packaging.requirements' 2>/dev/null; then
+    RC_ALT=0
+    OUT_ALT="$(cd "$D_ALT" && PATH="${NB_BIN}:${PATH}" PYTHONPATH="$FAKESITE" \
+      bash "$SCRIPTS/build-sdist.sh" pkg 2>/dev/null)" || RC_ALT=$?
+    assert_rc "PEP 517: installiert, aber zu alt -> rc 1" 1 "$RC_ALT"
+    assert_eq "PEP 517: installiert, aber zu alt -> keine Ausgabe" "" "$OUT_ALT"
+    assert_contains "PEP 517: zu alt -> Meldung nennt die installierte Version" \
+      "$(cd "$D_ALT" && PATH="${NB_BIN}:${PATH}" PYTHONPATH="$FAKESITE" \
+         bash "$SCRIPTS/build-sdist.sh" pkg 2>&1 >/dev/null)" \
+      "testpaket-xyz>=2.0 (installiert: 1.0)"
+  else
+    skip "PEP 517: Versionsvergleich der requires" "Modul 'packaging' fehlt - ohne es wird nur Anwesenheit geprueft"
+  fi
+
+  # Notausgang: wer weiss, dass sein Agent stimmt, schaltet die Pruefung ab.
+  ERR_AUS="$(cd "$D_ALT" && PATH="${NB_BIN}:${PATH}" PYTHONPATH="$FAKESITE" \
+    SKIP_REQUIRES_CHECK=1 bash "$SCRIPTS/build-sdist.sh" pkg 2>&1 >/dev/null)"
+  assert_contains "PEP 517: SKIP_REQUIRES_CHECK meldet sich im Log" "$ERR_AUS" \
+    "SKIP_REQUIRES_CHECK gesetzt"
+  assert_contains "PEP 517: SKIP_REQUIRES_CHECK laeuft bis zum Backend-Import durch" \
+    "$ERR_AUS" "gibtsnicht.backend"
+
+  # Eine unlesbare requires-Zeile ist ein Fehler im Projekt - klare Meldung
+  # statt Traceback.
+  D_MUELL="$(mk517 muell '[build-system]
+requires = ["<<< kein gueltiger Requirement-Ausdruck >>>"]
+build-backend = "gibtsnicht.backend"')"
+  if python3 -c 'import packaging.requirements' 2>/dev/null; then
+    ERR_MUELL="$(cd "$D_MUELL" && PATH="${NB_BIN}:${PATH}" \
+      bash "$SCRIPTS/build-sdist.sh" pkg 2>&1 >/dev/null)"
+    assert_contains "PEP 517: unlesbare requires-Zeile -> klare Meldung" "$ERR_MUELL" \
+      "einen Eintrag, den ich nicht lesen kann"
+    if grep -q 'Traceback' <<<"$ERR_MUELL"; then
+      nok "PEP 517: unlesbare requires-Zeile ohne Traceback" "Traceback im Log"
+    else ok "PEP 517: unlesbare requires-Zeile ohne Traceback"; fi
+  else
+    skip "PEP 517: unlesbare requires-Zeile" "Modul 'packaging' fehlt - Zeile wird dann nicht geparst"
+  fi
 
   D_TOML="$(mk517 kaputtes-toml 'das ist [kein gueltiges TOML')"
   RC_TOML=0
